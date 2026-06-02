@@ -2,11 +2,11 @@
 
 ## 1. Intent
 
-Produce a reproducible Caligula (Victoria 3) build profile on macOS for cross-machine benchmarking. The script wraps the user's existing Caligula source tree, runs `cmake` + `ninja` directly (bypassing `./configure.sh` for reasons documented in §5), times only the compile phase, and emits two artifacts: a build log ending with `Compile time: Hh Mm Ss` and a per-second TSV of memory/page state during the compile.
+Produce a reproducible Caligula (Victoria 3) build profile on macOS for cross-machine benchmarking. The script clones Caligula + cw from internal Paradox GitLab (SSH access required — VPN), pins both to hardcoded commit SHAs, runs `cmake` + `ninja` directly (bypassing `./configure.sh` for reasons documented in §5), times only the compile phase, and emits two artifacts: a build log ending with `Compile time: Hh Mm Ss` and a per-second TSV of memory/page state during the compile.
 
-**This harness's role is special.** Caligula is the proprietary game we actually want to benchmark, but its source is internal — we can't ship it to a rented cloud Mac. So this harness exists to produce the **ground-truth reference profile** that the publishable OGRE3D and Godot harnesses are tuned against. Whichever of those two lands closest to Caligula's measured profile (peak RAM + total wall-time + paging regime) becomes the publishable proxy for cross-provider benchmarking.
+**This harness's role is special.** Caligula is the proprietary game we actually want to benchmark, but its source is internal — we can't ship it to a rented cloud Mac without VPN access. So this harness exists to produce the **ground-truth reference profile** that the publishable LLVM (and lighter OGRE3D / Godot) harnesses are tuned against, on test machines that DO have VPN access. LLVM is the no-VPN benchmark used on rented Macs; this Caligula harness runs only on VPN-trusted machines.
 
-See `~/projects/ogre3d-build-benchmark/SPEC.md` and `~/projects/godot-build-benchmark/SPEC.md` for the candidate stand-ins.
+See `llvm-build-benchmark/SPEC.md` (canonical publishable benchmark), `ogre3d-build-benchmark/SPEC.md` and `godot-build-benchmark/SPEC.md` (lighter candidates).
 
 ## 2. Executive summary
 
@@ -24,7 +24,7 @@ See `~/projects/ogre3d-build-benchmark/SPEC.md` and `~/projects/godot-build-benc
   | Total pages paged out | ~7800 (121 MB) |
   | LTO link share | **0.1% (2s of 1593s)** |
 
-- **Run it**: `./build-caligula.sh` from this directory. Source tree must already be cloned at `$CALIGULA_DIR` (default `$HOME/projects/Caligula`), with the `cw` (Clausewitz engine) sibling at `$HOME/projects/cw`. No fetch phase — this is a local tree the user owns.
+- **Run it**: `./build-caligula.sh` from this directory. The harness will `git clone` both repos via SSH from `gitlab.build.paradox-interactive.com` if `$CALIGULA_DIR` (default `$HOME/projects/Caligula`) and `$CW_DIR` (default `$HOME/projects/cw`) don't already have `.git/`. Then it force-checks-out the pinned SHAs from §4. **Local working-tree edits in either repo will be discarded by the force-checkout** — stash them first if you have in-progress work.
 - **Outputs**: `logs/build-<ts>.log` (transcript) and `logs/memstats-<ts>.log` (TSV). Paired by timestamp.
 - **Analyse it**: `./analyse.sh logs/memstats-<ts>.log logs/build-<ts>.log` extracts the metrics in the table above.
 
@@ -63,11 +63,14 @@ This harness defaults to `osx-clang-ReleaseLto` — the same preset CI uses for 
 
 ### 3.4 What's a "harness"?
 
-A wrapper script that runs the real build and records measurements alongside. Three things happen each run:
+A wrapper script that fetches+pins the source, runs the real build, and records measurements alongside. Six phases per run:
 
-1. **Prerequisites are checked**. cmake, ninja, conan, python3, git, brew, GNU coreutils, plus the Caligula and Clausewitz source trees.
-2. **Configure-then-build happens with our paths**. We don't call Caligula's `configure.sh` — see §5 — but we replicate its two essential commands (conan + cmake configure) with paths we canonicalize ourselves.
-3. **The compile is timed and instrumented**. A background process samples `vm_stat` and `sysctl vm.swapusage` every second while CMake/Ninja builds. The compile timer wraps only the build step (not configure, not conan install).
+1. **Prerequisites verified**. cmake, ninja, conan, python3, git, brew, GNU coreutils.
+2. **Missing prereqs rescued via brew** with consent.
+3. **Source cloned** if absent. Two `git clone` invocations against `git@gitlab.build.paradox-interactive.com:gsg/caligula/caligula.git` and `…:gsg/tech/cw.git`. Idempotent — skips clone if `.git` exists.
+4. **Source pinned** to the SHAs in §4 via `git fetch --depth=1 origin <SHA>` + `git checkout --force --detach <SHA>`. Force-checkout discards local working-tree edits.
+5. **Configure** — we don't call Caligula's `configure.sh` (see §5.1), but we replicate its two essential commands (conan + cmake configure) with paths canonicalized via GNU `realpath`. Not in the timer.
+6. **Timed compile**. `cmake --build` with the memstats sampler running. The compile timer wraps only this step.
 
 ### 3.5 What the memstats sidecar measures
 
@@ -89,15 +92,42 @@ Link-Time Optimization (LTO) lets the linker re-optimise across the whole progra
 
 ## 4. Source pin
 
-**Caligula is not pinned by this script.** Unlike chromium/ogre3d/godot harnesses which clone upstream repos and pin to release tags, Caligula uses the user's local working tree at `$CALIGULA_DIR` (default `$HOME/projects/Caligula`). The user controls which Caligula revision is checked out — they `git checkout <branch>` or `git checkout <sha>` interactively before running this harness.
+Both repos are pinned to hardcoded SHAs in `build-caligula.sh`. Force-checked-out on every run — the local working tree's previous state is irrelevant to the pin.
 
-**Why no pin**: the user owns the source. They're not benchmarking a frozen revision — they're benchmarking *the build* on different hardware, possibly across multiple Caligula revisions over time. Pinning would constrain their workflow.
+| Repo | SHA | Pinned commit context |
+|---|---|---|
+| Caligula | `898f07d3bb140d9554b91da5f7a04d494523b4bd` | Merge of `fix/filters-journal-panel` into `develop` (2026-06-02) |
+| cw | `b9905ff34a25adcba34cdf9d2a5f452b7056d06d` | Merge of `caligula/fix/nojira-wrong-conanfile` into `caligula/develop` (2026-06-02) |
 
-**For reproducible cross-machine comparison**, the user should record which Caligula commit was checked out at measurement time (`git -C $CALIGULA_DIR rev-parse HEAD`) and re-checkout the same SHA on the comparison machine.
+**Clone URLs**:
+- `git@gitlab.build.paradox-interactive.com:gsg/caligula/caligula.git`
+- `git@gitlab.build.paradox-interactive.com:gsg/tech/cw.git`
+
+**Why pin**: cross-machine numbers are only comparable if the source is identical. Pinning removes one variable from the comparison. When the benchmark is re-run weeks later, the same compile workload is exercised.
+
+**Re-pinning.** When you want to benchmark a different Caligula commit (e.g. after a major feature lands), pick the matching cw commit and update both `CALIGULA_REV` and `CW_REV` constants near the top of `build-caligula.sh`. Commit + push. Subsequent runs on any test machine will fetch and use the new pin.
+
+**Choosing matching cw commits**: cw has a `caligula/develop` branch tracking Caligula's `develop`. When picking a new Caligula commit, use the cw commit that was Caligula's tip-of-`caligula/develop` at the time the Caligula commit was created. The two branches are co-developed — usually you can read the cw commit from Caligula's `cw_version.txt` or similar pin file, or from the conan lockfile.
+
+**Caveat**: this script's pin doesn't verify cw and Caligula are version-compatible. If you point at mismatched commits, the conan install or cmake configure will fail loudly during Phase 5.
 
 ## 5. Design decisions
 
 Substantive choices, recorded so that a later reviewer (or yourself, six months from now) understands the trail. Some of these were corrections to broken first attempts — flagged where applicable.
+
+### 5.0 Fetch + pin from internal GitLab (revised 2026-06-02)
+
+**This harness was originally designed to wrap a local working tree** without fetching. The rationale was: the user owns the source, doesn't want their working-tree forcibly modified, and pinning would constrain their workflow.
+
+**That design didn't survive the test-machine use case.** A test machine inside the VPN doesn't have Caligula source on disk and has no convenient way to get it — engineers shouldn't have to manually clone before running a benchmark harness. So as of 2026-06-02 the harness clones from internal GitLab (`gsg/caligula/caligula` and `gsg/tech/cw`) on first run and pins both to hardcoded SHAs.
+
+**Implications**:
+
+- **VPN is now a hard requirement.** Without SSH access to `gitlab.build.paradox-interactive.com`, Phase 3 fails. This is documented in §1 / §7.
+- **Force-checkout discards local edits.** If you run this harness on your dev laptop while you have working-tree changes in `$CALIGULA_DIR` or `$CW_DIR`, those changes will be lost. The harness `warn`s before each force-checkout. If you need to preserve dev edits, run `git stash` in both trees first, or run the benchmark on a separate machine.
+- **Cross-machine comparisons are now first-class.** Any machine with VPN access can run the harness and produce numbers directly comparable to other machines — same source, same pin, same flags.
+
+The previous "no source pin" design (§4 in the prior SPEC revision) is gone. See git history of `build-caligula.sh` if you need to recover the pre-clone behavior.
 
 ### 5.1 Bypass `configure.sh`, replicate its two commands inline
 
@@ -167,11 +197,7 @@ Caligula's build runs as `cmake --build … | while IFS= read -r line; do printf
 
 **Cost**: per-line `date` invocation — sub-millisecond, negligible over a 26-minute build.
 
-### 5.9 No source pin
-
-See §4. The user owns the source tree; pinning is their responsibility.
-
-### 5.10 Single timestamp variable shared between log files
+### 5.9 Single timestamp variable shared between log files
 
 The chromium script generates `build-<ts>.log` and `memstats-<ts>.log` with separate `date` calls; they can disagree if the build crosses a second boundary between the two. Caligula uses a single `TS="$(date +%Y%m%d-%H%M%S)"` at script start. Guarantees pairing. Trivial improvement.
 
@@ -214,6 +240,8 @@ Caligula's measured LTO link share is essentially zero. Thin-LTO distributes the
 - Not for measuring whether a *given* Caligula commit compiles correctly (use the user's interactive `./build.sh` for that — it picks up `compdb` regeneration which we skip).
 - Not for measuring conan-install performance — that's outside the timer.
 - Not for shipping binaries — `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` is set, so warnings aren't fatal. A real release build should run with `-Werror` on.
+- **Not for running on machines outside the Paradox VPN.** SSH clone of internal GitLab fails. Use the LLVM harness on rented cloud Macs instead.
+- **Not safe to run when you have in-progress edits in `$CALIGULA_DIR` or `$CW_DIR`.** Phase 4's `git checkout --force --detach` discards them. Stash first.
 
 ## 8. Failure modes
 
@@ -221,8 +249,10 @@ Caligula's measured LTO link share is essentially zero. Thin-LTO distributes the
 |---|---|---|
 | Phase 1 reports missing `cmake`/`ninja`/`conan` | Fresh machine | Allow rescue (omit `--no-rescue`) |
 | Phase 1 reports `readlink -m: missing` | Coreutils not installed or not findable | `brew install coreutils` |
-| Phase 1 reports `Caligula tree: missing` | `$CALIGULA_DIR` doesn't have a `CMakeLists.txt` | Pass `--caligula-dir <path>` or set `CALIGULA_DIR` env var |
-| Phase 1 reports `Clausewitz tree: missing` | `$CW_DIR` doesn't have a `clausewitz/` subdir | Pass `--cw-dir <path>` or set `CW_DIR` env var |
+| Phase 3 `git clone` hangs or fails with `Permission denied (publickey)` | SSH key not configured for gitlab.build.paradox-interactive.com | Add your SSH key to your GitLab profile; verify with `ssh -T git@gitlab.build.paradox-interactive.com` |
+| Phase 3 `git clone` fails with `Could not resolve hostname` | Not connected to Paradox VPN | Connect to VPN and re-run |
+| Phase 4 fetch fails: `fatal: unable to access … <SHA> not our ref` | The pinned SHA isn't reachable from default branch | Verify the SHA is still in the remote (`git ls-remote origin \| grep <SHA-prefix>`); if not, re-pin |
+| Phase 5 conan install fails: `…/clausewitz/conan/config/: No such directory` | cw clone or pin failed silently; cw tree is empty or mis-pinned | Re-run; if persistent, verify the cw commit matches Caligula's expected pin |
 | Configure fails: `conan config install … No such directory: '/clausewitz/conan/config/'` | `readlink -m` returned empty path | Coreutils gnubin missing from PATH — verify `prepend_coreutils_gnubin` ran (`Prepended coreutils gnubin to PATH` log line should appear) |
 | Compile fails: `non-portable path to file '"…/caligula/…"'; specified path differs in case from file name on disk` | Case-canonicalization disagreement; the `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` fallback didn't engage | See §5.2; verify the flag is being passed in `configure_phase` (check `build-<ts>.log` for `cmake configure (preset=..., -G Ninja, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)`) |
 | Build completes but script exits 1 | EXIT trap calls `kill`/`wait` on dead sampler under `set -e` | Already fixed in `build-caligula.sh:218-222`; if it recurs, verify each trap command has `\|\| true` |
@@ -255,15 +285,16 @@ caligula-build-benchmark/
     └── memstats-YYYYMMDD-HHMMSS.log
 ```
 
-Caligula source tree lives at `$CALIGULA_DIR` (default `$HOME/projects/Caligula`); Clausewitz engine at `$CW_DIR` (default `$HOME/projects/cw`). Neither is part of this repo. The user owns those trees and is responsible for checking out the Caligula revision under benchmark.
+Caligula source tree lives at `$CALIGULA_DIR` (default `$HOME/projects/Caligula`); Clausewitz engine at `$CW_DIR` (default `$HOME/projects/cw`). Neither is part of this repo — they are cloned from internal GitLab by the harness on first run and force-checked-out to the pinned SHAs (see §4) on every subsequent run. If you keep a dev tree at either location, expect its working state to be discarded each time the harness runs.
 
 ## 11. Relation to the other harnesses
 
-| Harness | Source | Pin | Purpose |
-|---|---|---|---|
-| `caligula-build-benchmark/` | Local working tree (proprietary) | User-controlled (no script pin) | **Ground-truth reference profile** |
-| `ogre3d-build-benchmark/` | `OGRECave/ogre` clone | v14.5.2 | Lighter publishable proxy candidate |
-| `godot-build-benchmark/` | `godotengine/godot` clone | 4.6.3-stable | Heavier publishable proxy candidate |
-| `chromium-build-benchmark-for-mac/` | `chromium/src` clone | Per-target SHAs | Earlier attempt; failed because Chromium's VM-tier pressure crashes at JOBS≥2 on 24 GB |
+| Harness | Source | Pin | VPN required | Purpose |
+|---|---|---|---|---|
+| `caligula-build-benchmark/` | Internal GitLab clone (proprietary) | Hardcoded SHAs in script | **Yes** | **Ground-truth reference profile** |
+| `llvm-build-benchmark/` | `llvm/llvm-project` clone | `llvmorg-22.1.7` | No | **Canonical publishable benchmark** |
+| `ogre3d-build-benchmark/` | `OGRECave/ogre` clone | `v14.5.2` | No | Lighter smoke-test candidate (too light by 64×) |
+| `godot-build-benchmark/` | `godotengine/godot` clone | `4.6.3-stable` | No | Heavier smoke-test candidate (too light by 8.6×) |
+| `chromium-build-benchmark-for-mac/` | `chromium/src` clone | Per-target SHAs | No | Archived; crashes at JOBS≥2 on 24 GB |
 
 The chromium harness is archived — it crashes reliably at JOBS≥2 on the reference 24 GB machine, making cross-machine comparison infeasible. Its SPEC.md (`~/projects/chromium-build-benchmark-for-mac/SPEC.md`) remains the canonical document on macOS VM-tier failure modes (§9), which the other three SPECs reference rather than duplicate.

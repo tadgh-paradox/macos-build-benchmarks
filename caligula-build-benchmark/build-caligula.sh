@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # Profile a Caligula (Victoria 3) build: time the compile + sidecar memory/page sampling.
-# Wraps the existing configure.sh; invokes cmake --build directly so JOBS is overridable.
-# Ported from ~/projects/chromium-build-benchmark-for-mac/build-chromium.sh — memstats sampler is identical.
+# Clones Caligula + cw from internal GitLab (VPN required), pins both to hardcoded SHAs,
+# then invokes cmake --build directly. Memstats sampler identical to the other harnesses.
 set -euo pipefail
 
 # --- Defaults and flags ---
 CALIGULA_DIR="${CALIGULA_DIR:-$HOME/projects/Caligula}"
 # CW_DIR defaults to a sibling of CALIGULA_DIR named "cw"; can override via env or --cw-dir.
 CW_DIR="${CW_DIR:-}"
+# Pinned commits. Update these constants when re-pinning to a new Caligula commit.
+# pin_revision() force-checks-out these SHAs — local working-tree edits will be discarded.
+CALIGULA_REV="898f07d3bb140d9554b91da5f7a04d494523b4bd"
+CW_REV="b9905ff34a25adcba34cdf9d2a5f452b7056d06d"
+# Internal GitLab SSH URLs. SSH access (via key in your ~/.ssh) to gitlab.build.paradox-interactive.com
+# is required; the script doesn't authenticate, it just runs `git clone` and lets git/ssh handle it.
+CALIGULA_REPO="git@gitlab.build.paradox-interactive.com:gsg/caligula/caligula.git"
+CW_REPO="git@gitlab.build.paradox-interactive.com:gsg/tech/cw.git"
 # Preset must end in -Debug/-DebugOpt/-Release/-ReleaseOpt/-ReleaseLto; build.sh derives target from this suffix.
 PRESET="${PRESET:-osx-clang-ReleaseLto}"
 # Parallelism for cmake --build. Empty = emulate Caligula's build.sh default: nproc --ignore 2.
@@ -42,9 +50,15 @@ Usage: $(basename "$0") [--preset NAME] [--jobs N] [--no-clean] [--check]
   --no-clean          Skip wipe of build/<preset>/. Default cold-build wipes for comparability.
   --check             Run prerequisite checks only; skip configure and build.
   --no-rescue         Do not attempt to brew install missing prerequisites.
-  --caligula-dir PATH Caligula source tree. Default: \$HOME/projects/Caligula. Env: CALIGULA_DIR.
-  --cw-dir PATH       Clausewitz engine sibling. Default: \$CALIGULA_DIR/../cw. Env: CW_DIR.
+  --caligula-dir PATH Caligula source tree (created if absent). Default: \$HOME/projects/Caligula.
+                      Env: CALIGULA_DIR.
+  --cw-dir PATH       Clausewitz engine sibling (created if absent). Default: \$CALIGULA_DIR/../cw.
+                      Env: CW_DIR.
   -h, --help          Show this help.
+
+Pinned commits (force-checked-out — local working-tree edits will be DISCARDED):
+  Caligula: $CALIGULA_REV
+  cw:       $CW_REV
 
 Outputs (paired by timestamp):
   logs/build-<ts>.log     — full transcript, ends with 'Compile time: Hh Mm Ss'
@@ -82,18 +96,6 @@ log "Preset: $PRESET"
 # --- Verification helpers ---
 need() { MISSING+=("$1"); warn "missing: $1"; }
 check_bin() { if command -v "$1" >/dev/null 2>&1; then log "$1: OK ($(command -v "$1"))"; else need "$1"; fi; }
-
-# Caligula tree must contain a CMakeLists.txt and the configure.sh entrypoint we wrap.
-check_caligula_tree() {
-  if [[ ! -f "$CALIGULA_DIR/CMakeLists.txt" ]]; then need "caligula-tree (no CMakeLists.txt at $CALIGULA_DIR)"; else log "Caligula tree: OK"; fi
-  if [[ ! -x "$CALIGULA_DIR/configure.sh" ]]; then need "caligula-configure (no executable configure.sh at $CALIGULA_DIR)"; else log "configure.sh: OK"; fi
-}
-
-# Clausewitz engine tree is referenced by configure.sh via -DADDITIONAL_BASE_DIR=$CW_DIR.
-# It also hosts conan/config/ which configure.sh installs at every run.
-check_cw_tree() {
-  if [[ ! -d "$CW_DIR/clausewitz" ]]; then need "cw-tree (no clausewitz/ subdir at $CW_DIR)"; else log "Clausewitz tree: OK"; fi
-}
 
 # Preset suffix gates which cmake target we build (replicates build.sh logic).
 check_preset() {
@@ -141,8 +143,6 @@ verify() {
   check_gnu_readlink
   # sha1sum used by configure.sh's compdb logic; provided by coreutils on macOS.
   if command -v sha1sum >/dev/null 2>&1; then log "sha1sum: OK ($(command -v sha1sum))"; else need "coreutils"; fi
-  check_caligula_tree
-  check_cw_tree
   check_preset
 }
 
@@ -155,9 +155,6 @@ rescue() {
         confirm "brew install $item?" || die "cannot proceed without $item"
         brew install "$item"
         ;;
-      caligula-tree|caligula-configure|cw-tree)
-        die "Caligula or Clausewitz tree missing — clone manually; this script does not fetch source"
-        ;;
       brew)
         die "Homebrew is required to rescue other deps; install from https://brew.sh first"
         ;;
@@ -167,6 +164,42 @@ rescue() {
   MISSING=()
   verify
   (( ${#MISSING[@]} == 0 )) || die "still missing after rescue: ${MISSING[*]}"
+}
+
+# --- Phase 3: clone Caligula + cw from internal GitLab if not already present. ---
+# Requires SSH access to gitlab.build.paradox-interactive.com (VPN). Idempotent:
+# skips the clone if .git already exists at the target path.
+fetch_source() {
+  log "=== Phase 3: fetch source from internal GitLab ==="
+  mkdir -p "$(dirname "$CALIGULA_DIR")"
+  if [[ -d "$CALIGULA_DIR/.git" ]]; then
+    log "$CALIGULA_DIR/.git already present, skipping Caligula clone"
+  else
+    log "Cloning $CALIGULA_REPO → $CALIGULA_DIR"
+    caffeinate -i git clone "$CALIGULA_REPO" "$CALIGULA_DIR"
+  fi
+  mkdir -p "$(dirname "$CW_DIR")"
+  if [[ -d "$CW_DIR/.git" ]]; then
+    log "$CW_DIR/.git already present, skipping cw clone"
+  else
+    log "Cloning $CW_REPO → $CW_DIR"
+    caffeinate -i git clone "$CW_REPO" "$CW_DIR"
+  fi
+}
+
+# --- Phase 4: pin both trees to the hardcoded SHAs. ---
+# Force-checkout: any local working-tree edits in $CALIGULA_DIR or $CW_DIR will be DISCARDED.
+# This is correct for benchmark reproducibility but destructive for a dev workflow — if you have
+# in-progress edits in either tree, stash them before running this harness.
+pin_revision() {
+  log "=== Phase 4: pinning Caligula to $CALIGULA_REV ==="
+  warn "force-checkout: any local working-tree edits in $CALIGULA_DIR will be discarded"
+  git -C "$CALIGULA_DIR" fetch --depth=1 origin "$CALIGULA_REV"
+  git -C "$CALIGULA_DIR" checkout --force --detach "$CALIGULA_REV"
+  log "=== Phase 4: pinning cw to $CW_REV ==="
+  warn "force-checkout: any local working-tree edits in $CW_DIR will be discarded"
+  git -C "$CW_DIR" fetch --depth=1 origin "$CW_REV"
+  git -C "$CW_DIR" checkout --force --detach "$CW_REV"
 }
 
 # --- Map preset suffix to the cmake target name (mirrors Caligula's build.sh case statement) ---
@@ -251,7 +284,7 @@ start_memstats_sampler() {
 # then rejects the mismatched #include. Inlining configure.sh's two commands with GNU-realpath'd
 # paths keeps every path on cmake's side of the disagreement.
 configure_phase() {
-  log "=== Phase 3: configure (preset=$PRESET) ==="
+  log "=== Phase 5: configure (preset=$PRESET) ==="
   local caligula_canonical cw_canonical build_dir
   caligula_canonical="$(realpath "$CALIGULA_DIR")"
   cw_canonical="$(realpath "$CW_DIR")"
@@ -295,7 +328,7 @@ configure_phase() {
 # Without timestamps on each line, link-share analysis can't correlate the LTO link
 # start with memstats samples. Per-line `date` adds ~ms; over a 35-min build, negligible.
 build_phase() {
-  log "=== Phase 4: compile (target=$BUILD_TARGET, jobs=$JOBS) ==="
+  log "=== Phase 6: compile (target=$BUILD_TARGET, jobs=$JOBS) ==="
   local build_dir="$CALIGULA_DIR/build/$PRESET"
   [[ -f "$build_dir/build.ninja" ]] || die "no build.ninja at $build_dir; configure failed?"
 
@@ -345,5 +378,7 @@ if (( CHECK_ONLY == 1 )); then
   exit 0
 fi
 
+fetch_source
+pin_revision
 configure_phase
 build_phase
