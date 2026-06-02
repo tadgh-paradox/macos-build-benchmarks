@@ -4,7 +4,7 @@ A set of build-time benchmark harnesses for ranking macOS hosting options (rente
 
 ## How the harnesses work
 
-1. Each harness pins its source to an immutable revision (release-tag SHA for LLVM/OGRE3D/Godot; user-controlled local tree for Caligula), runs `cmake`/`scons` configure, then a timed build at a chosen target.
+1. Each harness pins its source to an immutable revision — release-tag SHAs for LLVM/OGRE3D/Godot (cloned from public upstream), hardcoded commit SHAs for Caligula + cw (cloned from internal GitLab; VPN required). Each then runs `cmake`/`scons` configure and a timed build at a chosen target.
 2. A 1-Hz background sampler records `vm_stat` + `sysctl vm.swapusage` to a TSV alongside the build log for the entire compile phase; only the compile is timed (not configure, fetch, or conan install).
 3. Outputs are paired by timestamp: `logs/build-<ts>.log` + `logs/memstats-<ts>.log`. The included `analyse.sh` extracts peak RAM / peak swap / pageout regime / LTO link-share from the pair.
 
