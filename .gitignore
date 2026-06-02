@@ -1,0 +1,8 @@
+# Per-run build artifacts. Reference numbers live in each harness's SPEC.md §9.
+# Keep the logs/ directories themselves (via .gitkeep) so a fresh clone has the
+# expected path structure for the harness scripts.
+*/logs/*
+!*/logs/.gitkeep
+
+# macOS housekeeping
+.DS_Store
