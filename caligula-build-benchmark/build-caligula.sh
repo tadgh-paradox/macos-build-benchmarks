@@ -326,10 +326,21 @@ configure_phase() {
   #
   # ADDITIONAL_BASE_DIR is set by Caligula's configure.sh but no cmake code in the tree reads it as
   # of the pinned cw commit — kept here defensively in case future cw revisions reintroduce a consumer.
-  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_canonical, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)"
+  # -DPDX_BUILD_OUTPUT_DIRECTORY=<absolute-build-path> — same class of issue as CW_BASE_DIR.
+  # buildserver-vars sets PDX_BUILD_OUTPUT_DIRECTORY=$env{BINARY_OUTPUT_DIR}, which CI sets but
+  # we don't. Without BINARY_OUTPUT_DIR set, the preset puts an empty string into the cmake cache.
+  # post-project.cmake:48 tries to fall back via `if (NOT VAR) set(VAR ... CACHE STRING ...)`,
+  # but cmake's set-with-cache-no-FORCE doesn't overwrite an existing-but-empty cache entry, so
+  # the variable stays empty. Then post-project.cmake:95 does
+  # `get_filename_component(VAR ${VAR} REALPATH)` and the empty expansion leaves only two args,
+  # which cmake rejects ("incorrect number of arguments"). Setting it explicitly via -D bypasses
+  # the broken fallback. Value mirrors what local-vars + the post-project.cmake fallback would
+  # produce: ${CMAKE_SOURCE_DIR}/build (i.e. $caligula_canonical/build).
+  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_canonical, -DPDX_BUILD_OUTPUT_DIRECTORY=$caligula_canonical/build, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)"
   cmake -S "$caligula_canonical" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=On \
         -DPDX_BUILD_CACHE_DIRECTORY="$build_dir/build_cache" \
+        -DPDX_BUILD_OUTPUT_DIRECTORY="$caligula_canonical/build" \
         -DCW_BASE_DIR="$cw_canonical" \
         -DADDITIONAL_BASE_DIR="$cw_canonical" \
         -DPDX_ENABLE_AUDIT_DEPRECATED=ON \

@@ -182,6 +182,23 @@ Fix: pass `-DCW_BASE_DIR="$cw_canonical"` on the cmake command line (an absolute
 
 Aside: `ADDITIONAL_BASE_DIR` is set by `configure.sh` and our harness copies that line, but **no cmake code in the tree actually reads `ADDITIONAL_BASE_DIR`** as of the pinned cw commit. It's dead pass-through. Left in place defensively in case a future cw revision reintroduces a consumer; safe to remove.
 
+### 5.2c `-DPDX_BUILD_OUTPUT_DIRECTORY=<absolute-build-path>` works around an empty-cache-value gotcha
+
+Same class of bug as §5.2b, different variable. `buildserver-vars` sets `PDX_BUILD_OUTPUT_DIRECTORY=$env{BINARY_OUTPUT_DIR}`. CI sets `BINARY_OUTPUT_DIR` so the cache variable gets a real path. Our test machines don't, so the cache variable lands as an empty string.
+
+`post-project.cmake:48-49` tries to fall back:
+```cmake
+if ( NOT PDX_BUILD_OUTPUT_DIRECTORY )
+    set( PDX_BUILD_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build" CACHE STRING ... )
+endif()
+```
+
+The guard fires (NOT empty-string is TRUE), but `set(VAR ... CACHE STRING ...)` **without `FORCE`** doesn't overwrite an existing-but-empty cache entry. The cache variable stays empty. Then `post-project.cmake:95` does `get_filename_component( PDX_BUILD_OUTPUT_DIRECTORY ${PDX_BUILD_OUTPUT_DIRECTORY} REALPATH )` and the empty `${...}` expansion leaves only two args, which cmake rejects with `incorrect number of arguments`.
+
+Fix: pass `-DPDX_BUILD_OUTPUT_DIRECTORY="$caligula_canonical/build"` on the cmake command line. Value mirrors what `local-vars` + the bootstrap fallback would have produced.
+
+This is a one-off symptom of a broader pattern: `buildserver-vars` depends on three environment variables (`BINARY_OUTPUT_DIR`, `EXTERNAL_LIBS_PATH`, `PDX_INTERNAL_BUILD`) that CI sets but we don't. `EXTERNAL_LIBS_PATH` is only read when `PDX_USE_CONAN=Off`; we use conan, so it's a no-op. `PDX_INTERNAL_BUILD` is used downstream but tolerant of empty values. Only `BINARY_OUTPUT_DIR`-derived `PDX_BUILD_OUTPUT_DIRECTORY` has the broken fallback above. If a future cw revision adds more env-var-derived settings with similar broken fallbacks, expect the same fix pattern: add an explicit `-D` override.
+
 ### 5.3 `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` disables `-Werror`
 
 Caligula's `cw/clausewitz/build3/include/warnings.cmake` gates `-Werror` on `NOT PDX_ENABLE_AUDIT_DEPRECATED`. Setting the flag to `ON` keeps warnings as warnings rather than fatal errors. Used as defence-in-depth against §5.2's case-canonicalization disagreement leaking through.
@@ -278,6 +295,7 @@ Caligula's measured LTO link share is essentially zero. Thin-LTO distributes the
 | Phase 5 conan install fails: `[Errno 13] Permission denied: '$HOME/.conan2/extensions/plugins/compatibility/compatibility.py'` | Specific to some Paradox virtual macOS CI runners: the gitlab-runner executor runs as **root** while operating inside the CI user's `$HOME`. The first conan invocation creates `~/.conan2/` files owned by root; subsequent non-root invocations (or a different CI user) can't write them during a migration step. Outside CI, the same symptom can come from a prior `sudo conan …` or `sudo pip install conan` | `sudo chmod -R u+rwX "$HOME/.conan2" && sudo chown -R $(whoami) "$HOME/.conan2"` and re-run. For CI, fix by configuring the runner to execute as the CI user (not root) or by chowning the conan cache in a pre-build step |
 | `cmake configure` fails: `No such preset in …: "<name>"` and prints available presets | The preset isn't in canonical `CMakePresets.json` — it's a per-user `CMakeUserPresets.json` entry on the originating machine | Switch to a canonical preset (`buildserver-osx-clang-ReleaseLto` etc.) via `--preset` or env, or copy the matching `CMakeUserPresets.json` from the originating dev machine |
 | `cmake configure` fails: `project could not find requested file: cw/clausewitz/build3/pre-project.cmake` | The preset's parent-vars block sets `CW_BASE_DIR=cw` (subdir layout) but our harness clones cw as a sibling. Should be overridden by `-DCW_BASE_DIR=<absolute-cw-path>` in `configure_phase` | Verify `cmake configure …, -DCW_BASE_DIR=…` log line shows the absolute path. See §5.2b |
+| `cmake configure` fails inside `post-project.cmake` at line 95: `get_filename_component called with incorrect number of arguments` | `PDX_BUILD_OUTPUT_DIRECTORY` ended up empty in the cmake cache (from `buildserver-vars` referencing `$env{BINARY_OUTPUT_DIR}` which CI sets but local doesn't); the fallback in post-project.cmake:48-49 doesn't fire because `set(... CACHE STRING ...)` without FORCE can't overwrite an empty cache entry | Verify `cmake configure …, -DPDX_BUILD_OUTPUT_DIRECTORY=…` log line shows the absolute path. See §5.2c |
 | Configure fails: `conan config install … No such directory: '/clausewitz/conan/config/'` | `readlink -m` returned empty path | Coreutils gnubin missing from PATH — verify `prepend_coreutils_gnubin` ran (`Prepended coreutils gnubin to PATH` log line should appear) |
 | Compile fails: `non-portable path to file '"…/caligula/…"'; specified path differs in case from file name on disk` | Case-canonicalization disagreement; the `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` fallback didn't engage | See §5.2; verify the flag is being passed in `configure_phase` (check `build-<ts>.log` for `cmake configure (preset=..., -G Ninja, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)`) |
 | Build completes but script exits 1 | EXIT trap calls `kill`/`wait` on dead sampler under `set -e` | Already fixed in `build-caligula.sh:218-222`; if it recurs, verify each trap command has `\|\| true` |
