@@ -364,13 +364,21 @@ configure_phase() {
   #     canonicalization APIs disagree on case in a way that triggers -Wnonportable-include-path
   #     on PCH headers; the warning itself is fine, but -Werror promotes it to fatal. Compile
   #     time is unchanged — warnings cost no cycles.
-  # -DCW_BASE_DIR=<absolute-cw-path> overrides whatever the chosen preset's parent-vars block sets:
+  # -DCW_BASE_DIR=<relative-cw-path> overrides whatever the chosen preset's parent-vars block sets:
   #   local-vars sets CW_BASE_DIR=../cw (assumes cw is a sibling of CALIGULA_DIR)
   #   buildserver-vars sets CW_BASE_DIR=cw (assumes cw is a subdir of CALIGULA_DIR)
-  # ClausewitzBootstrap.cmake then does `set(CMAKE_PROJECT_INCLUDE_BEFORE ${CW_BASE_DIR}/clausewitz/build3/pre-project.cmake)`.
-  # With the buildserver preset and our sibling-cw layout, the unmodified `cw/...` path doesn't exist
-  # and cmake fails before project() runs. Setting it explicitly to the absolute path is correct
-  # under either preset family.
+  # We pass a *relative* path computed via realpath --relative-to. Two consumers, both happy:
+  #   - ClausewitzBootstrap.cmake:73 `set(CMAKE_PROJECT_INCLUDE_BEFORE ${CW_BASE_DIR}/clausewitz/build3/pre-project.cmake)`
+  #     CMake 3.27+ resolves relative CMAKE_PROJECT_INCLUDE_BEFORE relative to CMAKE_SOURCE_DIR.
+  #   - Caligula's conanfile.py does `f"{caligula_source}/{CW_BASE_DIR}"` (string interpolation,
+  #     not os.path.join). An absolute CW_BASE_DIR produces a malformed double-rooted path
+  #     "/source//other/cw/" that conan reports as "Clausewitz dir not found". A relative one
+  #     concatenates correctly to a real path.
+  # We previously passed $cw_canonical (absolute) which only satisfied the cmake bootstrap and
+  # broke the conanfile. realpath --relative-to gives us the path that satisfies both.
+  local cw_relative
+  cw_relative="$(realpath --relative-to="$caligula_canonical" "$cw_canonical")"
+  log "cw relative path (CALIGULA_DIR → CW_DIR): $cw_relative"
   #
   # ADDITIONAL_BASE_DIR is set by Caligula's configure.sh but no cmake code in the tree reads it as
   # of the pinned cw commit — kept here defensively in case future cw revisions reintroduce a consumer.
@@ -397,14 +405,14 @@ configure_phase() {
   # versions where the legacy module is still available, the search itself would fail without
   # a `python` symlink. Setting PYTHON_EXECUTABLE makes both concerns moot.
   local python_exec; python_exec="$(command -v python3)"
-  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_canonical, -DPDX_BUILD_OUTPUT_DIRECTORY=$caligula_canonical/build, -DPDX_ENABLE_AUDIT_DEPRECATED=ON, -DCMAKE_POLICY_DEFAULT_CMP0148=OLD, -DPYTHON_EXECUTABLE=$python_exec)"
+  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_relative, -DPDX_BUILD_OUTPUT_DIRECTORY=$caligula_canonical/build, -DPDX_ENABLE_AUDIT_DEPRECATED=ON, -DCMAKE_POLICY_DEFAULT_CMP0148=OLD, -DPYTHON_EXECUTABLE=$python_exec)"
   cmake -S "$caligula_canonical" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=On \
         -DCMAKE_POLICY_DEFAULT_CMP0148=OLD \
         -DPYTHON_EXECUTABLE="$python_exec" \
         -DPDX_BUILD_CACHE_DIRECTORY="$build_dir/build_cache" \
         -DPDX_BUILD_OUTPUT_DIRECTORY="$caligula_canonical/build" \
-        -DCW_BASE_DIR="$cw_canonical" \
+        -DCW_BASE_DIR="$cw_relative" \
         -DADDITIONAL_BASE_DIR="$cw_canonical" \
         -DPDX_ENABLE_AUDIT_DEPRECATED=ON \
         --preset "$PRESET" -G Ninja
