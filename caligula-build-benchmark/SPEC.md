@@ -161,6 +161,27 @@ The "winner" depends on the kernel namecache state, which is volatile across she
 
 **A more principled fix** would be to rename the directory on disk to a single canonical case (e.g., `mv caligula _tmp; mv _tmp Caligula`) so the filesystem stores one case consistently. The user opted not to do this because it touches their working tree and might surprise other tools that have cached the existing case. Worth revisiting if this disagreement bites again elsewhere.
 
+### 5.2b `-DCW_BASE_DIR=<absolute-cw-path>` overrides preset-family default
+
+Caligula's `ClausewitzBootstrap.cmake:73-74` does:
+```cmake
+set( CMAKE_PROJECT_INCLUDE_BEFORE ${CW_BASE_DIR}/clausewitz/build3/pre-project.cmake )
+set( CMAKE_PROJECT_INCLUDE        ${CW_BASE_DIR}/clausewitz/build3/post-project.cmake )
+```
+
+`CW_BASE_DIR` is set by the chosen preset's parent-vars block:
+
+| Preset family | parent `*-vars` | `CW_BASE_DIR` | Implied layout |
+|---|---|---|---|
+| `osx-clang-*` (user-presets variants) | `local-vars` | `../cw` | cw is a sibling of `$CALIGULA_DIR` |
+| `buildserver-osx-clang-*` | `buildserver-vars` | `cw` | cw is a subdir of `$CALIGULA_DIR` |
+
+Our harness clones cw as a sibling (default `$HOME/projects/cw`, sibling of `$HOME/projects/Caligula`) regardless of preset. Under the buildserver preset that's wrong — cmake fails with `project could not find requested file: cw/clausewitz/build3/pre-project.cmake` before `project()` even runs.
+
+Fix: pass `-DCW_BASE_DIR="$cw_canonical"` on the cmake command line (an absolute path). Command-line `-D` takes precedence over preset cache variables, so the override applies under any preset family. The harness works regardless of which preset variant the user picks.
+
+Aside: `ADDITIONAL_BASE_DIR` is set by `configure.sh` and our harness copies that line, but **no cmake code in the tree actually reads `ADDITIONAL_BASE_DIR`** as of the pinned cw commit. It's dead pass-through. Left in place defensively in case a future cw revision reintroduces a consumer; safe to remove.
+
 ### 5.3 `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` disables `-Werror`
 
 Caligula's `cw/clausewitz/build3/include/warnings.cmake` gates `-Werror` on `NOT PDX_ENABLE_AUDIT_DEPRECATED`. Setting the flag to `ON` keeps warnings as warnings rather than fatal errors. Used as defence-in-depth against §5.2's case-canonicalization disagreement leaking through.
@@ -256,6 +277,7 @@ Caligula's measured LTO link share is essentially zero. Thin-LTO distributes the
 | Phase 5 conan install fails: `…/clausewitz/conan/config/: No such directory` | cw clone or pin failed silently; cw tree is empty or mis-pinned | Re-run; if persistent, verify the cw commit matches Caligula's expected pin |
 | Phase 5 conan install fails: `[Errno 13] Permission denied: '$HOME/.conan2/extensions/plugins/compatibility/compatibility.py'` | Specific to some Paradox virtual macOS CI runners: the gitlab-runner executor runs as **root** while operating inside the CI user's `$HOME`. The first conan invocation creates `~/.conan2/` files owned by root; subsequent non-root invocations (or a different CI user) can't write them during a migration step. Outside CI, the same symptom can come from a prior `sudo conan …` or `sudo pip install conan` | `sudo chmod -R u+rwX "$HOME/.conan2" && sudo chown -R $(whoami) "$HOME/.conan2"` and re-run. For CI, fix by configuring the runner to execute as the CI user (not root) or by chowning the conan cache in a pre-build step |
 | `cmake configure` fails: `No such preset in …: "<name>"` and prints available presets | The preset isn't in canonical `CMakePresets.json` — it's a per-user `CMakeUserPresets.json` entry on the originating machine | Switch to a canonical preset (`buildserver-osx-clang-ReleaseLto` etc.) via `--preset` or env, or copy the matching `CMakeUserPresets.json` from the originating dev machine |
+| `cmake configure` fails: `project could not find requested file: cw/clausewitz/build3/pre-project.cmake` | The preset's parent-vars block sets `CW_BASE_DIR=cw` (subdir layout) but our harness clones cw as a sibling. Should be overridden by `-DCW_BASE_DIR=<absolute-cw-path>` in `configure_phase` | Verify `cmake configure …, -DCW_BASE_DIR=…` log line shows the absolute path. See §5.2b |
 | Configure fails: `conan config install … No such directory: '/clausewitz/conan/config/'` | `readlink -m` returned empty path | Coreutils gnubin missing from PATH — verify `prepend_coreutils_gnubin` ran (`Prepended coreutils gnubin to PATH` log line should appear) |
 | Compile fails: `non-portable path to file '"…/caligula/…"'; specified path differs in case from file name on disk` | Case-canonicalization disagreement; the `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` fallback didn't engage | See §5.2; verify the flag is being passed in `configure_phase` (check `build-<ts>.log` for `cmake configure (preset=..., -G Ninja, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)`) |
 | Build completes but script exits 1 | EXIT trap calls `kill`/`wait` on dead sampler under `set -e` | Already fixed in `build-caligula.sh:218-222`; if it recurs, verify each trap command has `\|\| true` |

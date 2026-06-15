@@ -316,10 +316,21 @@ configure_phase() {
   #     canonicalization APIs disagree on case in a way that triggers -Wnonportable-include-path
   #     on PCH headers; the warning itself is fine, but -Werror promotes it to fatal. Compile
   #     time is unchanged — warnings cost no cycles.
-  log "cmake configure (preset=$PRESET, -G Ninja, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)"
+  # -DCW_BASE_DIR=<absolute-cw-path> overrides whatever the chosen preset's parent-vars block sets:
+  #   local-vars sets CW_BASE_DIR=../cw (assumes cw is a sibling of CALIGULA_DIR)
+  #   buildserver-vars sets CW_BASE_DIR=cw (assumes cw is a subdir of CALIGULA_DIR)
+  # ClausewitzBootstrap.cmake then does `set(CMAKE_PROJECT_INCLUDE_BEFORE ${CW_BASE_DIR}/clausewitz/build3/pre-project.cmake)`.
+  # With the buildserver preset and our sibling-cw layout, the unmodified `cw/...` path doesn't exist
+  # and cmake fails before project() runs. Setting it explicitly to the absolute path is correct
+  # under either preset family.
+  #
+  # ADDITIONAL_BASE_DIR is set by Caligula's configure.sh but no cmake code in the tree reads it as
+  # of the pinned cw commit — kept here defensively in case future cw revisions reintroduce a consumer.
+  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_canonical, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)"
   cmake -S "$caligula_canonical" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=On \
         -DPDX_BUILD_CACHE_DIRECTORY="$build_dir/build_cache" \
+        -DCW_BASE_DIR="$cw_canonical" \
         -DADDITIONAL_BASE_DIR="$cw_canonical" \
         -DPDX_ENABLE_AUDIT_DEPRECATED=ON \
         --preset "$PRESET" -G Ninja
