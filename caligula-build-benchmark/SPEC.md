@@ -231,7 +231,9 @@ pip3 install --user conan==2.4.1
 # or: pipx install conan==2.4.1
 ```
 
-The harness `verify()` step warns when the installed conan version looks problematic (Conan 2.17+) but does not fail or auto-install. Auto-installing python tooling would mutate user state outside the harness's scope — `pip install --user`, `pipx`, or `brew install conan@2.4` are all the user's call.
+The harness `verify()` step warns when the installed conan version looks problematic (Conan 2.17+) but does not fail or auto-install at that point. If conan is **completely missing**, the `rescue()` step does offer to `pip3 install --user conan==2.4.1` (after confirmation) — but explicitly does NOT offer `brew install conan` for this dep, because the current Homebrew conan formula is exactly the broken-on-our-recipes version. Auto-installing python tooling has more side effects than `brew install`, hence the confirmation prompt.
+
+**PATH detection for pip-user installs**: `pip3 install --user` puts the `conan` binary in `~/Library/Python/X.Y/bin/`, which is **not** on the default macOS PATH. The harness handles this via `prepend_python_user_bin()` which runs `python3 -m site --user-base` to find the canonical user-install prefix and prepends `<prefix>/bin` to PATH at script start. Without this, `check_bin conan` would still report "missing" after a successful `pip install --user conan`, leading to the confusing rescue loop seen on the iMac Pro test machine where the user pip-installed conan but the harness then asked to brew install it.
 
 **When to revisit**: when the cw pin moves forward to a commit whose `pdx_conanrecipes` version is conan-2-clean (no `conans.*` imports), this constraint goes away. Until then, the conan version is part of the benchmark's input contract.
 

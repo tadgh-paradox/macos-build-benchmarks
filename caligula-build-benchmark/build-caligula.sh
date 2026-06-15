@@ -128,6 +128,20 @@ prepend_coreutils_gnubin() {
   fi
 }
 
+# `pip3 install --user conan==2.4.1` installs to `~/Library/Python/X.Y/bin` which is NOT on PATH
+# by default on macOS — pip warns at install time but most users miss it. The pinned conan
+# recipes need Conan 2.4.1 (see SPEC §5.2d), so we have to find pip-installed conans here.
+# `python3 -m site --user-base` returns the canonical user-install prefix; append /bin for tools.
+prepend_python_user_bin() {
+  if ! command -v python3 >/dev/null 2>&1; then return 0; fi
+  local user_base; user_base="$(python3 -m site --user-base 2>/dev/null)" || return 0
+  local user_bin="$user_base/bin"
+  if [[ -d "$user_bin" ]]; then
+    export PATH="$user_bin:$PATH"
+    log "Prepended Python user-base bin to PATH: $user_bin"
+  fi
+}
+
 # Verifies readlink -m works (which it does after prepend_coreutils_gnubin if coreutils is installed).
 check_gnu_readlink() {
   if readlink -m /tmp >/dev/null 2>&1; then log "readlink -m: OK ($(command -v readlink))"
@@ -179,9 +193,18 @@ rescue() {
   log "=== Phase 2: rescuing missing prerequisites ==="
   for item in "${MISSING[@]}"; do
     case "$item" in
-      cmake|ninja|python3|git|conan|coreutils)
+      cmake|ninja|python3|git|coreutils)
         confirm "brew install $item?" || die "cannot proceed without $item"
         brew install "$item"
+        ;;
+      conan)
+        # Don't brew install conan — current Homebrew version (2.29+) breaks against the pinned
+        # pdx_conanrecipes/6.1.2 (uses removed Conan 1 module namespace). Pin to 2.4.1 via pip
+        # instead. See SPEC §5.2d for the full version-range matrix. After install, conan binary
+        # lives at ~/Library/Python/X.Y/bin/conan — already on PATH because prepend_python_user_bin
+        # ran at script start.
+        confirm "pip3 install --user conan==2.4.1? (NB: brew install would pull the broken 2.29.x — see SPEC §5.2d)" || die "cannot proceed without conan"
+        pip3 install --user conan==2.4.1
         ;;
       brew)
         die "Homebrew is required to rescue other deps; install from https://brew.sh first"
@@ -412,6 +435,7 @@ build_phase() {
 
 # --- Main flow ---
 prepend_coreutils_gnubin
+prepend_python_user_bin
 verify
 
 if (( ${#MISSING[@]} > 0 )); then
