@@ -382,16 +382,18 @@ configure_phase() {
   #
   # ADDITIONAL_BASE_DIR is set by Caligula's configure.sh but no cmake code in the tree reads it as
   # of the pinned cw commit — kept here defensively in case future cw revisions reintroduce a consumer.
-  # -DPDX_BUILD_OUTPUT_DIRECTORY=<absolute-build-path> — same class of issue as CW_BASE_DIR.
-  # buildserver-vars sets PDX_BUILD_OUTPUT_DIRECTORY=$env{BINARY_OUTPUT_DIR}, which CI sets but
-  # we don't. Without BINARY_OUTPUT_DIR set, the preset puts an empty string into the cmake cache.
-  # post-project.cmake:48 tries to fall back via `if (NOT VAR) set(VAR ... CACHE STRING ...)`,
-  # but cmake's set-with-cache-no-FORCE doesn't overwrite an existing-but-empty cache entry, so
-  # the variable stays empty. Then post-project.cmake:95 does
-  # `get_filename_component(VAR ${VAR} REALPATH)` and the empty expansion leaves only two args,
-  # which cmake rejects ("incorrect number of arguments"). Setting it explicitly via -D bypasses
-  # the broken fallback. Value mirrors what local-vars + the post-project.cmake fallback would
-  # produce: ${CMAKE_SOURCE_DIR}/build (i.e. $caligula_canonical/build).
+  # env vars (BINARY_OUTPUT_DIR, EXTERNAL_LIBS_PATH, CC, CXX) — match what batmake's
+  # environment.set_vars task does (batmake/tasks/environment.py:47-54). buildserver-vars
+  # references $env{BINARY_OUTPUT_DIR} for PDX_BUILD_OUTPUT_DIRECTORY and $env{EXTERNAL_LIBS_PATH}
+  # for NEW_EXTERNAL_LIBS_DIR; setting them here makes the preset's substitutions resolve to
+  # real paths instead of empty strings, which avoids the realpath() error in post-project.cmake
+  # and aligns with CI's invocation pattern. See SPEC §5.0a (batmake relationship) and §5.2c.
+  export BINARY_OUTPUT_DIR="$caligula_canonical/build"
+  export EXTERNAL_LIBS_PATH="$caligula_canonical/build/external_libs"
+  export CC="clang"
+  export CXX="clang++"
+  log "env: BINARY_OUTPUT_DIR=$BINARY_OUTPUT_DIR  EXTERNAL_LIBS_PATH=$EXTERNAL_LIBS_PATH  CC=$CC  CXX=$CXX"
+
   # -DCMAKE_POLICY_DEFAULT_CMP0148=OLD restores the legacy FindPythonInterp/FindPythonLibs modules.
   # CMP0148 was introduced in CMake 3.27; under NEW (the default when unset on 3.27+) these
   # modules are removed. cw's clausewitz_tokens.cmake still calls find_package(PythonInterp...),
@@ -405,16 +407,20 @@ configure_phase() {
   # versions where the legacy module is still available, the search itself would fail without
   # a `python` symlink. Setting PYTHON_EXECUTABLE makes both concerns moot.
   local python_exec; python_exec="$(command -v python3)"
-  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_relative, -DPDX_BUILD_OUTPUT_DIRECTORY=$caligula_canonical/build, -DPDX_ENABLE_AUDIT_DEPRECATED=ON, -DCMAKE_POLICY_DEFAULT_CMP0148=OLD, -DPYTHON_EXECUTABLE=$python_exec)"
+
+  # -DPDX_CONAN_UPLOAD=Off — disable the CI-only post-install upload of built conan packages to
+  # artifactory-local-v2. buildserver-vars sets it to On (CMakePresets.json:67) expecting CI's
+  # Vault-derived artifactory token. We're benchmarking, not publishing; no creds needed.
+  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_relative, -DPDX_ENABLE_AUDIT_DEPRECATED=ON, -DCMAKE_POLICY_DEFAULT_CMP0148=OLD, -DPYTHON_EXECUTABLE=$python_exec, -DPDX_CONAN_UPLOAD=Off)"
   cmake -S "$caligula_canonical" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=On \
         -DCMAKE_POLICY_DEFAULT_CMP0148=OLD \
         -DPYTHON_EXECUTABLE="$python_exec" \
         -DPDX_BUILD_CACHE_DIRECTORY="$build_dir/build_cache" \
-        -DPDX_BUILD_OUTPUT_DIRECTORY="$caligula_canonical/build" \
         -DCW_BASE_DIR="$cw_relative" \
         -DADDITIONAL_BASE_DIR="$cw_canonical" \
         -DPDX_ENABLE_AUDIT_DEPRECATED=ON \
+        -DPDX_CONAN_UPLOAD=Off \
         --preset "$PRESET" -G Ninja
 }
 

@@ -129,6 +129,45 @@ Substantive choices, recorded so that a later reviewer (or yourself, six months 
 
 The previous "no source pin" design (§4 in the prior SPEC revision) is gone. See git history of `build-caligula.sh` if you need to recover the pre-clone behavior.
 
+### 5.0a Relationship to batmake (the canonical CI build flow)
+
+Caligula and the rest of the Paradox game pipeline are normally built via **batmake** (`gsg/build/batmake`), a Python `invoke`-based build orchestrator. The `.gitlab-ci.yml` calls `batmake build` and batmake does the heavy lifting: clone cw, set environment variables, run cmake configure + build, archive, sign binaries, upload symbols, post Slack notifications. The `-D` flags / `$env{...}` substitutions / preset choices that make a CI build succeed mostly come from batmake's orchestration, not from the user typing them by hand.
+
+**batmake's compile-relevant flow:**
+
+1. **`batmake environment.set_vars`** (`batmake/tasks/environment.py:47-54`) — sets these env vars before cmake is invoked:
+   - `EXTERNAL_LIBS_PATH` (feeds `NEW_EXTERNAL_LIBS_DIR=$env{EXTERNAL_LIBS_PATH}`)
+   - `BINARY_OUTPUT_DIR` (feeds `PDX_BUILD_OUTPUT_DIRECTORY=$env{BINARY_OUTPUT_DIR}`)
+   - `CC=clang` / `CXX=clang++` on Linux/Darwin
+2. **`batmake build.generate`** — `cmake -S <workspace> --preset <configure-preset> -L` plus any `BATMAKE_CMAKE_FLAGS` env appended.
+3. **`batmake build.build`** — `cmake --build --preset <build-preset>`. Uses **build presets** (the separate `buildPresets` section in `CMakePresets.json`), which carry parallelism and target settings.
+
+Once the env vars are set, `buildserver-vars`'s `$env{...}` substitutions resolve to real paths, the rest of the cw bootstrap chain works without complaint, and no manual `-D` overrides are needed (in CI's controlled environment).
+
+**Why this harness sidesteps batmake:**
+
+- **Compile-timer scope.** We time only `cmake --build`. batmake's timer would include configure, conan install, archive, symbol upload, etc. We deliberately exclude those — see §5.6.
+- **Memstats correlation.** We need every line of compile output prefixed `[HH:MM:SS]` for the sampler to be analysable (§5.8). batmake's logging format doesn't add per-line wall-clock.
+- **No archive / symbol / Slack steps.** batmake does a lot of post-build work we don't want for a benchmark.
+- **Direct parallelism control.** batmake reads parallelism from the build preset; we want a uniform `JOBS` knob across all four harnesses.
+
+**Net effect of bypassing batmake**: the harness has to perform the env-var setup batmake would have done, AND it has to override several preset cache variables that `buildserver-vars` assumes were filled in by env-var substitution OR that CI's controlled host environment happens to satisfy. The current overrides break down like this:
+
+| Mechanism | What it does | batmake equivalent | Why we still need it on top of batmake's parity |
+|---|---|---|---|
+| `export BINARY_OUTPUT_DIR` env | Feeds the preset's `$env{BINARY_OUTPUT_DIR}` substitution | `batmake/tasks/environment.py:47` sets the same env | — fully aligned with batmake |
+| `export EXTERNAL_LIBS_PATH` env | Feeds `$env{EXTERNAL_LIBS_PATH}` substitution | `environment.py:48` sets the same env | — aligned; no-op under conan |
+| `export CC=clang` / `CXX=clang++` env | Makes the toolchain explicit | `environment.py:53-54` sets the same env on macOS/Linux | — aligned |
+| `-DCW_BASE_DIR=<relative>` | Override `buildserver-vars`'s `CW_BASE_DIR=cw` default | batmake doesn't override; CI checks cw out as a subdir of the workspace so the preset's default works | We clone cw as a sibling, not a subdir — different layout (§5.2b) |
+| `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` | Disables clausewitz's `-Werror` | batmake doesn't set this; CI runs with `-Werror` on | macOS APFS case-insensitivity disagreement (§5.2) |
+| `-DCMAKE_POLICY_DEFAULT_CMP0148=OLD` | Restores legacy `FindPythonInterp` module | batmake doesn't set this; CI uses an older cmake | CMake 3.27+ default removes the legacy module (§5.2e) |
+| `-DPYTHON_EXECUTABLE=$(command -v python3)` | Skip cw's `find_package(PythonInterp)` lookup | batmake doesn't set this; CI runners have `python` on PATH | Modern macOS only ships `python3`, not `python` (§5.2e) |
+| `-DPDX_CONAN_UPLOAD=Off` | Disable conan-upload-after-install | batmake doesn't override; CI's runners are authenticated against artifactory and the buildserver-vars default `On` is correct | We don't publish from a benchmark machine and don't have artifactory creds set up (§5.2f) |
+
+The four `-D` overrides that remain after the env-var alignment reflect host-configuration differences between CI runners and the typical engineer's macOS host — they're real workarounds, not architectural bypasses.
+
+**When this section gets shorter**: when the cw pin moves to a commit whose recipes/cmake are tolerant of (a) sibling vs subdir cw, (b) case-insensitive APFS, (c) cmake 3.27+ defaults, (d) macOS systems without a `python` symlink. Until then, the four remaining overrides are the cost of running a benchmark outside batmake.
+
 ### 5.1 Bypass `configure.sh`, replicate its two commands inline
 
 Caligula's `configure.sh` derives paths via `pwd -P` and `readlink -m`. On case-insensitive APFS, these return one canonical case (lowercase `caligula`) while cmake's internal canonicalization returns the other (uppercase `Caligula`). The mixed case leaks into the cmake cache — one variable lowercase, all others uppercase — and then into the PCH (Pre-Compiled Header) machinery, which trips clang's `-Wnonportable-include-path` warning, which Caligula's `-Werror` promotes to fatal.
@@ -189,22 +228,15 @@ We initially passed the absolute `$cw_canonical`, which satisfied cmake but brok
 
 Aside: `ADDITIONAL_BASE_DIR` is set by `configure.sh` and our harness copies that line, but **no cmake code in the tree actually reads `ADDITIONAL_BASE_DIR`** as of the pinned cw commit. It's dead pass-through. Left in place defensively in case a future cw revision reintroduces a consumer; safe to remove.
 
-### 5.2c `-DPDX_BUILD_OUTPUT_DIRECTORY=<absolute-build-path>` works around an empty-cache-value gotcha
+### 5.2c `export BINARY_OUTPUT_DIR` (and friends) before invoking cmake
 
-Same class of bug as §5.2b, different variable. `buildserver-vars` sets `PDX_BUILD_OUTPUT_DIRECTORY=$env{BINARY_OUTPUT_DIR}`. CI sets `BINARY_OUTPUT_DIR` so the cache variable gets a real path. Our test machines don't, so the cache variable lands as an empty string.
+**Historical note** (revised after reading batmake's source, see §5.0a): this section originally documented a `-DPDX_BUILD_OUTPUT_DIRECTORY` `-D` override that worked around a broken cmake-cache fallback. The proper fix — and the one this harness now uses — is to set the **environment variable** the preset expects, matching what `batmake/tasks/environment.py:47-54` does in CI. The end result is identical (`PDX_BUILD_OUTPUT_DIRECTORY` ends up as a real path) but takes the batmake-canonical path rather than going around the preset.
 
-`post-project.cmake:48-49` tries to fall back:
-```cmake
-if ( NOT PDX_BUILD_OUTPUT_DIRECTORY )
-    set( PDX_BUILD_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build" CACHE STRING ... )
-endif()
-```
+`buildserver-vars` defines `PDX_BUILD_OUTPUT_DIRECTORY=$env{BINARY_OUTPUT_DIR}`. CI sets `BINARY_OUTPUT_DIR`, so the preset substitutes a real path. Our harness sets the same env var (`export BINARY_OUTPUT_DIR="$caligula_canonical/build"`) before invoking cmake. Plus `EXTERNAL_LIBS_PATH` and `CC`/`CXX` for completeness — matches batmake's three sets exactly.
 
-The guard fires (NOT empty-string is TRUE), but `set(VAR ... CACHE STRING ...)` **without `FORCE`** doesn't overwrite an existing-but-empty cache entry. The cache variable stays empty. Then `post-project.cmake:95` does `get_filename_component( PDX_BUILD_OUTPUT_DIRECTORY ${PDX_BUILD_OUTPUT_DIRECTORY} REALPATH )` and the empty `${...}` expansion leaves only two args, which cmake rejects with `incorrect number of arguments`.
+**Original failure mode this prevents**: without `BINARY_OUTPUT_DIR` set, the preset substitutes an empty string into the cmake cache. `post-project.cmake:48-49` tries to fall back via `if (NOT VAR) set(VAR ... CACHE STRING ...)`, but cmake's `set(... CACHE STRING ...)` without `FORCE` doesn't overwrite an existing-but-empty cache entry. The variable stays empty. Then `post-project.cmake:95` does `get_filename_component( PDX_BUILD_OUTPUT_DIRECTORY ${PDX_BUILD_OUTPUT_DIRECTORY} REALPATH )` and the empty `${...}` expansion leaves only two args, which cmake rejects with `incorrect number of arguments`. Setting `BINARY_OUTPUT_DIR` env keeps the path non-empty all the way through.
 
-Fix: pass `-DPDX_BUILD_OUTPUT_DIRECTORY="$caligula_canonical/build"` on the cmake command line. Value mirrors what `local-vars` + the bootstrap fallback would have produced.
-
-This is a one-off symptom of a broader pattern: `buildserver-vars` depends on three environment variables (`BINARY_OUTPUT_DIR`, `EXTERNAL_LIBS_PATH`, `PDX_INTERNAL_BUILD`) that CI sets but we don't. `EXTERNAL_LIBS_PATH` is only read when `PDX_USE_CONAN=Off`; we use conan, so it's a no-op. `PDX_INTERNAL_BUILD` is used downstream but tolerant of empty values. Only `BINARY_OUTPUT_DIR`-derived `PDX_BUILD_OUTPUT_DIRECTORY` has the broken fallback above. If a future cw revision adds more env-var-derived settings with similar broken fallbacks, expect the same fix pattern: add an explicit `-D` override.
+**Why the env-var path is preferred over a `-D` override**: feeding the preset what it expects rather than overriding its derived variable means we ride on the same substitution machinery CI uses. If cw changes how `PDX_BUILD_OUTPUT_DIRECTORY` is computed (different formula, different cache type, different fallback), the env-var approach continues to work; the `-D` approach would need to be re-aligned.
 
 ### 5.2d Conan version range: pinned cw needs Conan ≤ 2.16-ish
 
@@ -271,6 +303,21 @@ The harness applies two `-D` overrides:
 Either alone might suffice on some machines; together they cover both failure modes regardless of cmake version or system Python layout.
 
 **When this goes away**: when the cw pin moves forward to a commit whose token-generation cmake uses `find_package(Python3 COMPONENTS Interpreter)` (or similar), both overrides become unnecessary. Until then they're part of the harness's input contract.
+
+### 5.2f `-DPDX_CONAN_UPLOAD=Off` skips the CI-only artifactory upload
+
+`CMakePresets.json:67` (inside `buildserver-vars`) sets `PDX_CONAN_UPLOAD=On`. `pdx_conan.cmake:184` then guards a post-install block that:
+
+1. Runs `conan list -f json -g conan-graph.json` against the just-installed dependency set.
+2. Runs `conan upload --list conan-list.json -r artifactory-local-v2 -c` to push built packages back to the shared cache.
+
+In CI this is desirable: the runner is Vault-authenticated against artifactory and uploading rebuilds keeps the shared cache warm for downstream pipelines. On a benchmark machine it's unwanted: we have no artifactory credentials, no need to publish, and the upload step fails with `Please log in to "artifactory-local-v2"` once it reaches the auth step.
+
+`local-vars`-derived presets leave `PDX_CONAN_UPLOAD` at the `Off` default (declared in `cw/clausewitz/build3/include/pdx_conan.cmake:25`), which is why builds with the previous default preset (`osx-clang-ReleaseLto`, user-presets variant) didn't trip it.
+
+Fix: `-DPDX_CONAN_UPLOAD=Off` on the cmake command line. The upload block's `if (PDX_CONAN_UPLOAD)` guard short-circuits; conan install completes normally; the build moves on to the compile step.
+
+**Authentication reference (if you ever do need it)**: Vault path `shared/artifactory_api_key_cloud/token@bat`, field `conan_account_token` (see `batmake/batmake/pdx_artifactory.py:22-34`). Alternatively a personal API key from `https://pdx.jfrog.io` → User Profile → Generate API Key, then `conan remote login artifactory-local-v2 <paradox-username> -p <api-key>`. Both are out of scope for this benchmark harness.
 
 ### 5.3 `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` disables `-Werror`
 
@@ -373,6 +420,7 @@ Caligula's measured LTO link share is essentially zero. Thin-LTO distributes the
 | Phase 5 conan install fails: `ModuleNotFoundError: No module named 'conans.errors'` | Pinned `pdx_conanrecipes/6.1.2` uses Conan-1-style imports (`conans.errors`); the compat shim was removed in newer Conan 2 versions (~2.17+); affects Homebrew's current conan (2.29.0 as of writing) | Pin conan to a version with the shim: `brew uninstall conan && pip3 install --user conan==2.4.1` (or `pipx install conan==2.4.1`). See §5.2d for the full version-range matrix |
 | Phase 5 cmake fails: `[ERROR] TokenGeneration requires Python to be installed` (with a CMake Warning about CMP0148) | CMake 3.27+ defaults policy CMP0148 to NEW, which removes the legacy `FindPythonInterp` module that cw's token generator still calls | Already overridden in the harness via `-DCMAKE_POLICY_DEFAULT_CMP0148=OLD`. Verify the log line. See §5.2e |
 | Phase 5 cmake fails: `[ERROR] TokenGeneration requires Python to be installed` (WITHOUT a CMP0148 warning) | Legacy `FindPythonInterp` is available but can't find an executable named `python` on PATH (system only has `python3`; no pyenv shim) | Already overridden via `-DPYTHON_EXECUTABLE=$(command -v python3)`. Verify the log line shows `-DPYTHON_EXECUTABLE=…`. See §5.2e |
+| Phase 5 conan upload prompts for login: `Please log in to "artifactory-local-v2"` | `buildserver-vars` preset sets `PDX_CONAN_UPLOAD=On` expecting CI's Vault-derived artifactory auth | Already overridden via `-DPDX_CONAN_UPLOAD=Off`. Verify the cmake configure log line. See §5.2f for the auth-reference if you actually need to upload (rare for a benchmark) |
 | Configure fails: `conan config install … No such directory: '/clausewitz/conan/config/'` | `readlink -m` returned empty path | Coreutils gnubin missing from PATH — verify `prepend_coreutils_gnubin` ran (`Prepended coreutils gnubin to PATH` log line should appear) |
 | Compile fails: `non-portable path to file '"…/caligula/…"'; specified path differs in case from file name on disk` | Case-canonicalization disagreement; the `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` fallback didn't engage | See §5.2; verify the flag is being passed in `configure_phase` (check `build-<ts>.log` for `cmake configure (preset=..., -G Ninja, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)`) |
 | Build completes but script exits 1 | EXIT trap calls `kill`/`wait` on dead sampler under `set -e` | Already fixed in `build-caligula.sh:218-222`; if it recurs, verify each trap command has `\|\| true` |
