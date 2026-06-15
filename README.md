@@ -14,7 +14,7 @@ Per-harness `SPEC.md` files document each project's source pin, design decisions
 
 Reference rig for the numbers below: 14-core / 24 GB Apple Silicon Mac, macOS 15.7.x, JOBS=12 (`nproc --ignore 2`). Measurements 2026-06-01 (Caligula) and 2026-06-02 (LLVM, Godot, OGRE3D).
 
-### Caligula — `osx-clang-ReleaseLto` (ground-truth reference)
+### Caligula — `buildserver-osx-clang-ReleaseLto` (ground-truth reference)
 
 | Wall time | Peak RAM | Peak pageout | Total paged | LTO link share |
 |---|---|---|---|---|

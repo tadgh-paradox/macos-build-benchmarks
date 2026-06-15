@@ -17,7 +17,10 @@ CW_REV="b9905ff34a25adcba34cdf9d2a5f452b7056d06d"
 CALIGULA_REPO="git@gitlab.build.paradox-interactive.com:gsg/caligula/caligula.git"
 CW_REPO="git@gitlab.build.paradox-interactive.com:gsg/tech/cw.git"
 # Preset must end in -Debug/-DebugOpt/-Release/-ReleaseOpt/-ReleaseLto; build.sh derives target from this suffix.
-PRESET="${PRESET:-osx-clang-ReleaseLto}"
+# Default is the buildserver-* variant, which exists in canonical CMakePresets.json and is what CI uses.
+# The developer-only `osx-clang-ReleaseLto` was previous default but only exists in a per-user
+# CMakeUserPresets.json — fresh clones (test machines, CI runners) don't have it.
+PRESET="${PRESET:-buildserver-osx-clang-ReleaseLto}"
 # Parallelism for cmake --build. Empty = emulate Caligula's build.sh default: nproc --ignore 2.
 JOBS="${JOBS:-}"
 # Memstats sampling interval in seconds; 1s is fine-grained enough for per-second pageout rate analysis.

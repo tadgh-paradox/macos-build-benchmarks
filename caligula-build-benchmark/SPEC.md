@@ -10,7 +10,7 @@ See `llvm-build-benchmark/SPEC.md` (canonical publishable benchmark), `ogre3d-bu
 
 ## 2. Executive summary
 
-- **What it does**: invokes `cmake configure` + `cmake --build` on a local Caligula source tree at the `osx-clang-ReleaseLto` preset (default), times the compile phase, samples memory state every second.
+- **What it does**: clones Caligula + cw from internal GitLab if absent, force-checks-out the pinned SHAs (§4), then invokes `cmake configure` + `cmake --build` at the `buildserver-osx-clang-ReleaseLto` preset (default — the CI-canonical macOS LTO preset). Times the compile phase, samples memory state every second.
 - **Reference profile** (measured 2026-06-01 on a 14-core / 24 GB Apple Silicon Mac at JOBS=12):
 
   | Metric | Value |
@@ -59,7 +59,7 @@ CMake 3.19+ supports **presets** — named configurations stored in `CMakePreset
 | `ReleaseOpt` | `victoria3_R_opt` | Optimised Release variant |
 | `ReleaseLto` | `victoria3` | Release + Link-Time Optimization (CI target) |
 
-This harness defaults to `osx-clang-ReleaseLto` — the same preset CI uses for the macOS shipping binary.
+This harness defaults to **`buildserver-osx-clang-ReleaseLto`** — the preset CI uses for the macOS shipping binary, defined in canonical `CMakePresets.json` and therefore available on any fresh clone. (The previous default, the developer-only `osx-clang-ReleaseLto`, lives in a per-user `CMakeUserPresets.json` and isn't present on fresh checkouts; see §7.2 for the consequence.)
 
 ### 3.4 What's a "harness"?
 
@@ -221,9 +221,10 @@ The reference profile in §2 was measured under specific conditions:
 - 14-core / 24 GB Apple Silicon Mac (M-series)
 - macOS 15.7.x
 - JOBS=12 (auto-resolved from `nproc --ignore 2`)
-- Caligula at the commit checked out on 2026-06-01 (record this per measurement)
+- Caligula at the commit checked out on 2026-06-01 (now pinned at `898f07d3…`; see §4)
 - Conan packages already cached locally (first-ever run would take longer)
 - Cold-build (`--clean`)
+- Preset: `osx-clang-ReleaseLto` (the developer-only `CMakeUserPresets.json` variant). The harness now defaults to `buildserver-osx-clang-ReleaseLto`, which is in canonical `CMakePresets.json` and is also what CI uses. The two presets compile the same source with the same flags — they differ only in build-output-dir conventions — so the workload is functionally identical. **Strictly speaking the §9 baseline numbers should be re-validated on the reference rig under the new default preset before being treated as canonical for the new harness.** Expected delta: <5%.
 
 To compare another machine's profile against this baseline, match these conditions. Specifically: same arch, same JOBS, same Caligula commit, same preset. Mismatched arch (Intel vs Apple Silicon) renders the comparison meaningless.
 
@@ -253,6 +254,8 @@ Caligula's measured LTO link share is essentially zero. Thin-LTO distributes the
 | Phase 3 `git clone` fails with `Could not resolve hostname` | Not connected to Paradox VPN | Connect to VPN and re-run |
 | Phase 4 fetch fails: `fatal: unable to access … <SHA> not our ref` | The pinned SHA isn't reachable from default branch | Verify the SHA is still in the remote (`git ls-remote origin \| grep <SHA-prefix>`); if not, re-pin |
 | Phase 5 conan install fails: `…/clausewitz/conan/config/: No such directory` | cw clone or pin failed silently; cw tree is empty or mis-pinned | Re-run; if persistent, verify the cw commit matches Caligula's expected pin |
+| Phase 5 conan install fails: `[Errno 13] Permission denied: '$HOME/.conan2/extensions/plugins/compatibility/compatibility.py'` | Conan cache has files owned by root or read-only (usually from a prior root-owned conan install or pip-as-root) | `sudo chmod -R u+rwX "$HOME/.conan2" && sudo chown -R $(whoami) "$HOME/.conan2"` and re-run |
+| `cmake configure` fails: `No such preset in …: "<name>"` and prints available presets | The preset isn't in canonical `CMakePresets.json` — it's a per-user `CMakeUserPresets.json` entry on the originating machine | Switch to a canonical preset (`buildserver-osx-clang-ReleaseLto` etc.) via `--preset` or env, or copy the matching `CMakeUserPresets.json` from the originating dev machine |
 | Configure fails: `conan config install … No such directory: '/clausewitz/conan/config/'` | `readlink -m` returned empty path | Coreutils gnubin missing from PATH — verify `prepend_coreutils_gnubin` ran (`Prepended coreutils gnubin to PATH` log line should appear) |
 | Compile fails: `non-portable path to file '"…/caligula/…"'; specified path differs in case from file name on disk` | Case-canonicalization disagreement; the `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` fallback didn't engage | See §5.2; verify the flag is being passed in `configure_phase` (check `build-<ts>.log` for `cmake configure (preset=..., -G Ninja, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)`) |
 | Build completes but script exits 1 | EXIT trap calls `kill`/`wait` on dead sampler under `set -e` | Already fixed in `build-caligula.sh:218-222`; if it recurs, verify each trap command has `\|\| true` |
