@@ -387,12 +387,21 @@ configure_phase() {
   # -DCMAKE_POLICY_DEFAULT_CMP0148=OLD restores the legacy FindPythonInterp/FindPythonLibs modules.
   # CMP0148 was introduced in CMake 3.27; under NEW (the default when unset on 3.27+) these
   # modules are removed. cw's clausewitz_tokens.cmake still calls find_package(PythonInterp...),
-  # which fails under NEW with "TokenGeneration requires Python to be installed". The pinned
-  # cw can't be patched, so we force the legacy behavior at cmake invocation time.
-  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_canonical, -DPDX_BUILD_OUTPUT_DIRECTORY=$caligula_canonical/build, -DPDX_ENABLE_AUDIT_DEPRECATED=ON, -DCMAKE_POLICY_DEFAULT_CMP0148=OLD)"
+  # which fails under NEW with "TokenGeneration requires Python to be installed".
+  #
+  # -DPYTHON_EXECUTABLE=$(command -v python3) sidesteps the legacy-module search altogether.
+  # clausewitz_tokens.cmake:1 is `if (NOT PYTHON_EXECUTABLE) find_package(PythonInterp QUIET)`,
+  # so pre-setting the variable skips find_package entirely. Needed because legacy
+  # FindPythonInterp looks for an executable named `python` (no version suffix); modern macOS
+  # systems only have `python3` in PATH. Belt-and-suspenders with CMP0148=OLD: even on cmake
+  # versions where the legacy module is still available, the search itself would fail without
+  # a `python` symlink. Setting PYTHON_EXECUTABLE makes both concerns moot.
+  local python_exec; python_exec="$(command -v python3)"
+  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_canonical, -DPDX_BUILD_OUTPUT_DIRECTORY=$caligula_canonical/build, -DPDX_ENABLE_AUDIT_DEPRECATED=ON, -DCMAKE_POLICY_DEFAULT_CMP0148=OLD, -DPYTHON_EXECUTABLE=$python_exec)"
   cmake -S "$caligula_canonical" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=On \
         -DCMAKE_POLICY_DEFAULT_CMP0148=OLD \
+        -DPYTHON_EXECUTABLE="$python_exec" \
         -DPDX_BUILD_CACHE_DIRECTORY="$build_dir/build_cache" \
         -DPDX_BUILD_OUTPUT_DIRECTORY="$caligula_canonical/build" \
         -DCW_BASE_DIR="$cw_canonical" \
