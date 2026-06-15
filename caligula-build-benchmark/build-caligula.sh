@@ -384,9 +384,15 @@ configure_phase() {
   # which cmake rejects ("incorrect number of arguments"). Setting it explicitly via -D bypasses
   # the broken fallback. Value mirrors what local-vars + the post-project.cmake fallback would
   # produce: ${CMAKE_SOURCE_DIR}/build (i.e. $caligula_canonical/build).
-  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_canonical, -DPDX_BUILD_OUTPUT_DIRECTORY=$caligula_canonical/build, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)"
+  # -DCMAKE_POLICY_DEFAULT_CMP0148=OLD restores the legacy FindPythonInterp/FindPythonLibs modules.
+  # CMP0148 was introduced in CMake 3.27; under NEW (the default when unset on 3.27+) these
+  # modules are removed. cw's clausewitz_tokens.cmake still calls find_package(PythonInterp...),
+  # which fails under NEW with "TokenGeneration requires Python to be installed". The pinned
+  # cw can't be patched, so we force the legacy behavior at cmake invocation time.
+  log "cmake configure (preset=$PRESET, -G Ninja, -DCW_BASE_DIR=$cw_canonical, -DPDX_BUILD_OUTPUT_DIRECTORY=$caligula_canonical/build, -DPDX_ENABLE_AUDIT_DEPRECATED=ON, -DCMAKE_POLICY_DEFAULT_CMP0148=OLD)"
   cmake -S "$caligula_canonical" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=On \
+        -DCMAKE_POLICY_DEFAULT_CMP0148=OLD \
         -DPDX_BUILD_CACHE_DIRECTORY="$build_dir/build_cache" \
         -DPDX_BUILD_OUTPUT_DIRECTORY="$caligula_canonical/build" \
         -DCW_BASE_DIR="$cw_canonical" \

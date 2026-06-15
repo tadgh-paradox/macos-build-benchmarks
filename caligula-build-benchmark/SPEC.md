@@ -237,6 +237,22 @@ The harness `verify()` step warns when the installed conan version looks problem
 
 **When to revisit**: when the cw pin moves forward to a commit whose `pdx_conanrecipes` version is conan-2-clean (no `conans.*` imports), this constraint goes away. Until then, the conan version is part of the benchmark's input contract.
 
+### 5.2e `-DCMAKE_POLICY_DEFAULT_CMP0148=OLD` keeps `FindPythonInterp` available
+
+CMake policy [CMP0148](https://cmake.org/cmake/help/latest/policy/CMP0148.html) was introduced in CMake 3.27 (mid-2023). It deprecates and eventually removes the legacy `FindPythonInterp` and `FindPythonLibs` modules in favor of the newer `find_package(Python)` / `find_package(Python3)`. Under the NEW behavior (the default when the policy is unset on cmake 3.27+), `find_package(PythonInterp)` fails outright.
+
+`cw/clausewitz/build3/include/clausewitz_tokens.cmake:2` still calls `find_package(PythonInterp ...)`. On a recent-enough cmake (the iMac Pro's Homebrew cmake hits this; the dev laptop's slightly-older one didn't), the build fails before the compile step with:
+
+```
+[ERROR] TokenGeneration requires Python to be installed.
+```
+
+Even though Python *is* installed and on `$PATH` — cmake just refuses to look for it via the legacy module.
+
+Fix: pass `-DCMAKE_POLICY_DEFAULT_CMP0148=OLD` on the cmake command line. Restores the legacy behavior for this single policy across the whole project; doesn't affect other deprecated-module decisions.
+
+**When this goes away**: when the cw pin moves forward to a commit whose token-generation cmake uses `find_package(Python3 COMPONENTS Interpreter)` (or similar), this override becomes unnecessary. Until then it's part of the harness's input contract.
+
 ### 5.3 `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` disables `-Werror`
 
 Caligula's `cw/clausewitz/build3/include/warnings.cmake` gates `-Werror` on `NOT PDX_ENABLE_AUDIT_DEPRECATED`. Setting the flag to `ON` keeps warnings as warnings rather than fatal errors. Used as defence-in-depth against §5.2's case-canonicalization disagreement leaking through.
@@ -335,6 +351,7 @@ Caligula's measured LTO link share is essentially zero. Thin-LTO distributes the
 | `cmake configure` fails: `project could not find requested file: cw/clausewitz/build3/pre-project.cmake` | The preset's parent-vars block sets `CW_BASE_DIR=cw` (subdir layout) but our harness clones cw as a sibling. Should be overridden by `-DCW_BASE_DIR=<absolute-cw-path>` in `configure_phase` | Verify `cmake configure …, -DCW_BASE_DIR=…` log line shows the absolute path. See §5.2b |
 | `cmake configure` fails inside `post-project.cmake` at line 95: `get_filename_component called with incorrect number of arguments` | `PDX_BUILD_OUTPUT_DIRECTORY` ended up empty in the cmake cache (from `buildserver-vars` referencing `$env{BINARY_OUTPUT_DIR}` which CI sets but local doesn't); the fallback in post-project.cmake:48-49 doesn't fire because `set(... CACHE STRING ...)` without FORCE can't overwrite an empty cache entry | Verify `cmake configure …, -DPDX_BUILD_OUTPUT_DIRECTORY=…` log line shows the absolute path. See §5.2c |
 | Phase 5 conan install fails: `ModuleNotFoundError: No module named 'conans.errors'` | Pinned `pdx_conanrecipes/6.1.2` uses Conan-1-style imports (`conans.errors`); the compat shim was removed in newer Conan 2 versions (~2.17+); affects Homebrew's current conan (2.29.0 as of writing) | Pin conan to a version with the shim: `brew uninstall conan && pip3 install --user conan==2.4.1` (or `pipx install conan==2.4.1`). See §5.2d for the full version-range matrix |
+| Phase 5 cmake fails: `[ERROR] TokenGeneration requires Python to be installed` (with a CMake Warning about CMP0148) | CMake 3.27+ defaults policy CMP0148 to NEW, which removes the legacy `FindPythonInterp` module that cw's token generator still calls | Already overridden in the harness via `-DCMAKE_POLICY_DEFAULT_CMP0148=OLD`. Verify the `cmake configure …, -DCMAKE_POLICY_DEFAULT_CMP0148=OLD` log line appears. See §5.2e |
 | Configure fails: `conan config install … No such directory: '/clausewitz/conan/config/'` | `readlink -m` returned empty path | Coreutils gnubin missing from PATH — verify `prepend_coreutils_gnubin` ran (`Prepended coreutils gnubin to PATH` log line should appear) |
 | Compile fails: `non-portable path to file '"…/caligula/…"'; specified path differs in case from file name on disk` | Case-canonicalization disagreement; the `-DPDX_ENABLE_AUDIT_DEPRECATED=ON` fallback didn't engage | See §5.2; verify the flag is being passed in `configure_phase` (check `build-<ts>.log` for `cmake configure (preset=..., -G Ninja, -DPDX_ENABLE_AUDIT_DEPRECATED=ON)`) |
 | Build completes but script exits 1 | EXIT trap calls `kill`/`wait` on dead sampler under `set -e` | Already fixed in `build-caligula.sh:218-222`; if it recurs, verify each trap command has `\|\| true` |
