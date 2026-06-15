@@ -135,11 +135,36 @@ check_gnu_readlink() {
   fi
 }
 
+# The pinned cw commit references `pdx_conanrecipes/6.1.2@internal`, which imports
+# `from conans.errors import ConanException` (Conan 1.x module namespace). Conan 2.x
+# kept a `conans.*` compatibility shim for a while, then removed it around 2.17.
+# Recipes that still use the old import name fail on newer Conan 2 with
+# `ModuleNotFoundError: No module named 'conans.errors'`. Known working: 2.4.1.
+# Known broken: 2.29.0. We warn (not fail) — users can override with their own conan if
+# they know what they're doing.
+check_conan_version() {
+  local v; v=$(conan --version 2>&1 | awk '{print $NF}')
+  if [[ "$v" =~ ^2\.([0-9]+)\. ]]; then
+    local minor="${BASH_REMATCH[1]}"
+    if (( minor > 16 )); then
+      warn "conan $v: pinned pdx_conanrecipes/6.1.2 uses Conan-1-style imports (conans.errors); the compat shim was removed in newer Conan 2 versions and is known to fail at 2.29.0. If Phase 5 fails with \"ModuleNotFoundError: No module named 'conans.errors'\", run: brew uninstall conan && pip3 install --user conan==2.4.1 (or pipx install conan==2.4.1)"
+    else
+      log "conan version: $v (within the range expected to work with pinned cw recipes)"
+    fi
+  elif [[ "$v" =~ ^1\. ]]; then
+    log "conan version: $v (Conan 1.x — should work natively with pinned cw recipes)"
+  else
+    warn "conan version: $v (unrecognised — neither 1.x nor 2.x?)"
+  fi
+}
+
 verify() {
   log "=== Phase 1: verifying prerequisites ==="
   check_bin cmake
   check_bin ninja
   check_bin conan
+  # Run the conan version check only after we know conan is installed.
+  if command -v conan >/dev/null 2>&1; then check_conan_version; fi
   check_bin python3
   check_bin git
   check_bin brew
