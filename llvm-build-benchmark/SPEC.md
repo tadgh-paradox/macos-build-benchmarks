@@ -56,8 +56,8 @@ A wrapper script that runs the real build and records measurements alongside. Si
 | `-DLLVM_INCLUDE_BENCHMARKS=OFF` | Same reason. |
 | `-DLLVM_INCLUDE_EXAMPLES=OFF` | Same reason. |
 | `-DLLVM_TARGETS_TO_BUILD=AArch64` | Build only Apple Silicon codegen. The default `all` adds 25+ backends (x86, ARM, PowerPC, MIPS, RISC-V, …) — substantial extra compile work that's not "fair" cross-arch. |
-| `-DLLVM_PARALLEL_COMPILE_JOBS=$JOBS` | LLVM-internal parallelism cap (extra layer on top of ninja's `--parallel`). |
-| `-DLLVM_PARALLEL_LINK_JOBS=$LINK_JOBS` | Concurrent LTO link cap. Each LTO link eats 3-5 GB; concurrent links are the standard way to OOM an LLVM build. Default `1` (parity baseline, safe for <32 GB). Tunable via `--link-jobs N` for max-capacity runs on bigger hosts. See §7.3. |
+| `-DLLVM_PARALLEL_COMPILE_JOBS=$JOBS` | LLVM-internal parallelism cap. Set only if `JOBS` is provided. **Default: unset on `main` (matches production CI's batmake defaults).** Tier branches set `nproc --ignore 2`. See §7.3. |
+| `-DLLVM_PARALLEL_LINK_JOBS=$LINK_JOBS` | Concurrent LTO link cap. Each LTO link eats 3-5 GB; concurrent links are the standard way to OOM an LLVM build. Set only if `LINK_JOBS` is provided. **Default: unset on `main` (matches production CI).** Tier branches `24`/`32`/`64` set `1`/`2`/`4`. See §7.3. |
 
 ### 3.5 What the memstats sidecar measures
 
@@ -112,56 +112,62 @@ Caligula is a game engine with heavy template instantiation, PCH-heavy compile u
 
 ### 7.2 Cross-machine comparison preconditions
 
-Same as the other harnesses:
+Same as the other harnesses, plus a branch-discipline rule specific to this harness:
 
 1. Same `JOBS` value.
 2. Same arch (Apple Silicon both, or x86_64 both — not mixed).
 3. Both `memstats` sidecars show neither run was paging catastrophically.
 4. Both runs used the same LLVM pin and the same `build-llvm.sh` revision.
-5. Same `LINK_JOBS` *column* — compare parity-to-parity or max-capacity-to-max-capacity, never mixed. See §7.3.
+5. **Same branch.** Comparing across machines requires both runs on the same git branch (`main`, `24`, `32`, or `64`) — mixing branches mixes two different workload definitions. See §7.3 for which branch answers which question.
 
-### 7.3 `LLVM_PARALLEL_LINK_JOBS` is tunable per host RAM (parity vs max-capacity columns)
+### 7.3 Branch layout — `main` matches production CI, tier branches are tuned per host RAM
 
-LLVM's LTO link of `clang` itself eats 3-5 GB of RAM. On the 24 GB reference rig at `JOBS=12`, concurrent LTO links would OOM — `LLVM_PARALLEL_LINK_JOBS=1` is load-bearing. On a 64 GB rented Mac that same `=1` is artificial: the host could absorb 2-4 concurrent links and finish faster.
+This benchmark needs to satisfy two requirements that pull in opposite directions:
 
-This creates a methodology tension for cross-machine comparison:
+- **Match what production CI does** so the numbers say something about real build behaviour. Paradox CI builds (caligula, titus, marius) all run via `batmake` and set *neither* `LLVM_PARALLEL_LINK_JOBS` *nor* `--parallel N` — they accept ninja's defaults (compile = `nproc+2`, link = unbounded). Anything we cap in this harness diverges from that.
+- **Run safely across multiple host RAM tiers (24 / 32 / 64 GB)**. Uncapped LTO links eat 3-5 GB each; on a 24 GB host with `nproc+2 ≈ 14` parallel compile jobs, multiple concurrent LTO links OOM. On a 64 GB host the same uncapped config is fine.
 
-- **Hold link-jobs at 1 everywhere** → apples-to-apples comparison, but high-RAM machines look less capable than they actually are.
-- **Tune link-jobs per host** → each machine runs at its true capacity, but you're now comparing two different workloads.
+We resolve this by giving each requirement its own **branch**:
 
-We resolve this by reporting **two columns per machine**.
+| Branch | `JOBS` (compile cap) | `LINK_JOBS` (link cap) | Target host | What it represents |
+|---|---|---|---|---|
+| `main` | unset → ninja default (`nproc+2`) | unset → unbounded | any host with enough RAM | **Production-equivalent.** Mirrors batmake/CI defaults exactly. Answers "what does production CI do on this hardware?" Will OOM on a 24 GB host — don't run there. |
+| `24` | `nproc --ignore 2` | 1 | 24 GB host (reference rig) | **Safe baseline.** Conservative caps for the smallest target tier. All canonical measurements in §9/§10 were taken on this config. |
+| `32` | `nproc --ignore 2` | 2 | 32-63 GB host | Tier-tuned: 2 concurrent LTO links comfortably fit (+3-5 GB above 24's peak). |
+| `64` | `nproc --ignore 2` | 4 | ≥64 GB host | Tier-tuned: 4 concurrent LTO links, max-capacity for this size (+9-15 GB above 24's peak). |
 
-#### The two columns
+#### Why this layout instead of one branch with conditional logic
 
-| Column | Configuration | Purpose |
-|---|---|---|
-| **Parity** | `LINK_JOBS=1` (script default on `main`) | Apples-to-apples cross-machine ranking. Every machine runs identically. Headline number for "which silicon is faster on this fixed workload?" |
-| **Max-capacity** | `LINK_JOBS` tuned to host RAM (see table below) | What the machine can do when not artificially constrained by the 24 GB baseline. Answers "what would this hardware do in a real CI pipeline that tunes per host?" |
+A previous revision put `LINK_JOBS=1` as a *default* on `main` and asked operators to flip it per host. That design hid the asymmetry between this benchmark and production CI — the harness looked more conservative than CI without ever telling you. The investigation that surfaced this is recorded in commit history; the takeaway: **the benchmark should not silently differ from production**. Now `main` *is* the CI-equivalent reference and the caps are explicit tier choices on named branches.
 
-When publishing a comparison, **label which column each number comes from**. Never mix parity and max-capacity numbers in the same column — that's the failure mode this methodology exists to prevent.
+#### When to use each branch
 
-#### Per-host tuning table
+| Question | Branch |
+|---|---|
+| "What does production CI do on this hardware?" | `main` (on a host with ≥32 GB; expect OOM on 24 GB) |
+| "Compare two machines on a fixed safe-for-everyone workload" | `24` (lowest common denominator; runs everywhere) |
+| "What's this 32 GB host's max-capacity build look like?" | `32` |
+| "What's this 64 GB host's max-capacity build look like?" | `64` |
 
-LTO links eat ~3-5 GB each. Sized to leave headroom above the reference rig's 19.5 GB peak:
+#### Cross-machine comparison rule
 
-| Host RAM | `LINK_JOBS` | Expected peak above parity baseline | Git branch |
-|---|---|---|---|
-| <32 GB | 1 | n/a (this is the baseline) | `main` |
-| 32-63 GB | 2 | +3-5 GB | `32` |
-| ≥64 GB | 4 | +9-15 GB | `64` |
+**Both runs must be on the same branch.** Mixing branches conflates "machine A is faster" with "machine A got a less-constrained config." The two natural columns when reporting a comparison:
+
+- **Tier-safe column**: every machine runs `24`. Apples-to-apples; conservative everywhere; runs on any tier. Most defensible for headline "which silicon is faster?" claims.
+- **Tier-max column**: every machine runs its own tier branch (24 GB → `24`, 32 → `32`, 64 → `64`). Shows tier ceiling, not pure silicon comparison — a 32 GB machine getting `LINK_JOBS=2` is partly winning because the workload changed.
+
+`main` is meaningful for capacity-planning (does this host survive what CI throws at it?) but **not for cross-tier ranking**, because OOMing or near-OOMing on small hosts distorts wall-time non-linearly.
 
 #### How to invoke
 
-Two equivalent paths:
-
-1. **`--link-jobs N` flag or `LINK_JOBS=N` env var** on any branch — explicit override for one run.
-2. **Check out the matching tier branch** — the `32` and `64` branches change only the script's default `LINK_JOBS` value, so `./build-llvm.sh` with no args produces the tuned config. This is the recommended path for the benchmark operator: no flag to forget, and the branch name documents which tier the log files belong to.
+- **Recommended**: `git checkout <branch>` and run `./build-llvm.sh` with no args. The branch is the contract; the log filename pairs cleanly with the branch name in your records.
+- **Per-run override** on any branch: `--jobs N` / `JOBS=N` and `--link-jobs N` / `LINK_JOBS=N`. Useful for ad-hoc experiments without switching branches.
 
 #### Caveats
 
-- **`JOBS` (compile parallelism) is still resolved from CPU count**, not RAM. Same on all branches. Only the link-jobs default changes per branch.
-- **The parity column is the canonical cross-machine ranking number.** Max-capacity is a secondary column for context, not a replacement.
-- Per §7.1, neither column predicts absolute Caligula build time — both are ranking proxies.
+- **The CI machines this benchmark targets run ~64 GB RAM as Kubernetes nodes**, with each build pod requesting 8 vCPU / 50 GiB (highspec) per `batmake/templates/game-pipeline.yml`. The `64` branch is the closest match to a pod's actual capacity ceiling — though ninja inside the pod uses the *node's* CPU count, not the pod request, which is a separate concern.
+- **The measured numbers in §9 / §10 were taken on the `24` branch's config** (14-core / 24 GB Apple Silicon at `JOBS=12`, `LINK_JOBS=1`). They are NOT directly comparable to a `main`-branch run on the same hardware — `main` would attempt unbounded link parallelism.
+- Per §7.1, none of these branches predicts absolute Caligula build time. They are all ranking proxies.
 
 ### 7.4 `LLVM_ENABLE_PROJECTS` is a knob — and you also need `--target all` to actually build the subprojects
 
@@ -276,9 +282,14 @@ The canonical config slightly overshoots — 2049s vs Caligula's 1593s. We didn'
 
 If you want a closer match, untested options: `clang;lld + target=all` (no MLIR but build all of clang;lld's tools) likely lands somewhere in 600-1500s. Worth measuring as future work if exact-time-match matters.
 
-### 11.3 `LLVM_PARALLEL_LINK_JOBS` tuning across RAM tiers — implemented
+### 11.3 `LLVM_PARALLEL_LINK_JOBS` and `JOBS` tuning across RAM tiers — implemented via branches
 
-Previously a known limitation: `=1` is load-bearing at 24 GB but artificial on 32+ GB hosts. Now implemented via the `LINK_JOBS` env var / `--link-jobs N` flag, with tier-tuned defaults on the `32` and `64` git branches. See §7.3 for the parity vs max-capacity column methodology and the per-host table.
+Previously a known limitation. Resolved by the branch layout in §7.3:
+
+- `main` is uncapped on both compile and link → matches production CI's batmake defaults exactly.
+- `24` / `32` / `64` set explicit safe caps for their target host RAM tier.
+
+This replaces the earlier `LINK_JOBS=1` script default that silently diverged from production CI behaviour.
 
 ### 11.4 LLVM is not game-engine-shaped
 
