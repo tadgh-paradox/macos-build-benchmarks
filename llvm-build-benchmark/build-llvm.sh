@@ -237,20 +237,26 @@ configure_phase() {
     log "build.ninja already present, skipping configure"
     return
   fi
-  local -a parallel_args=()
-  if [[ -n "$JOBS" ]];      then parallel_args+=("-DLLVM_PARALLEL_COMPILE_JOBS=$JOBS"); fi
-  if [[ -n "$LINK_JOBS" ]]; then parallel_args+=("-DLLVM_PARALLEL_LINK_JOBS=$LINK_JOBS"); fi
+  # Build the full cmake invocation as a single array so the optional LLVM_PARALLEL_*_JOBS
+  # flags can be appended conditionally. Single-array form keeps it portable to bash <4.4
+  # under `set -u` — an empty array expansion via "${arr[@]}" errors on older bash.
+  local -a configure_args=(
+    -S "$LLVM_DIR/llvm"
+    -B "$build_dir"
+    -G Ninja
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+    -DLLVM_ENABLE_PROJECTS="$LLVM_PROJECTS"
+    -DLLVM_ENABLE_LTO=Thin
+    -DLLVM_INCLUDE_TESTS=OFF
+    -DLLVM_INCLUDE_BENCHMARKS=OFF
+    -DLLVM_INCLUDE_EXAMPLES=OFF
+    -DLLVM_TARGETS_TO_BUILD=AArch64
+  )
+  if [[ -n "$JOBS" ]];      then configure_args+=("-DLLVM_PARALLEL_COMPILE_JOBS=$JOBS"); fi
+  if [[ -n "$LINK_JOBS" ]]; then configure_args+=("-DLLVM_PARALLEL_LINK_JOBS=$LINK_JOBS"); fi
   log "Running cmake configure (projects=$LLVM_PROJECTS, LTO=Thin, ninja)"
-  cmake -S "$LLVM_DIR/llvm" -B "$build_dir" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
-    -DLLVM_ENABLE_PROJECTS="$LLVM_PROJECTS" \
-    -DLLVM_ENABLE_LTO=Thin \
-    -DLLVM_INCLUDE_TESTS=OFF \
-    -DLLVM_INCLUDE_BENCHMARKS=OFF \
-    -DLLVM_INCLUDE_EXAMPLES=OFF \
-    -DLLVM_TARGETS_TO_BUILD=AArch64 \
-    "${parallel_args[@]}"
+  cmake "${configure_args[@]}"
 }
 
 # --- Phase 6: timed compile. Sampler + per-line [HH:MM:SS] prefix loop. ---
@@ -268,10 +274,12 @@ build_phase() {
   trap "kill $sampler_pid 2>/dev/null || true; wait $sampler_pid 2>/dev/null || true" EXIT INT TERM
   log "Memstats sampler PID $sampler_pid → $memstats_log (interval=${MEMSTATS_INTERVAL}s)"
 
-  local -a build_args=()
-  if [[ -n "$JOBS" ]]; then build_args+=(--parallel "$JOBS"); fi
+  # Same single-array trick as configure_phase — keeps the empty-array expansion off the hot path.
+  local -a cmake_build_args=(--build "$build_dir")
+  if [[ -n "$JOBS" ]]; then cmake_build_args+=(--parallel "$JOBS"); fi
+  cmake_build_args+=(--target "$BUILD_TARGET")
   local compile_start=$SECONDS
-  caffeinate -i cmake --build "$build_dir" "${build_args[@]}" --target "$BUILD_TARGET" 2>&1 \
+  caffeinate -i cmake "${cmake_build_args[@]}" 2>&1 \
     | while IFS= read -r line; do
         printf '[%s] %s\n' "$(date +%H:%M:%S)" "$line"
       done
