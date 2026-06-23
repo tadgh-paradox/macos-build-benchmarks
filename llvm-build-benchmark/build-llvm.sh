@@ -16,8 +16,9 @@ LLVM_TAG="llvmorg-22.1.7"
 LLVM_PROJECTS="${LLVM_PROJECTS:-clang;lld;mlir}"
 BUILD_TARGET="${BUILD_TARGET:-all}"
 JOBS="${JOBS:-}"
-# Concurrent LTO link cap. Default 2 on this branch (`32`) — max-capacity tier for 32-63 GB hosts.
-# Parity baseline (=1) lives on `main`; ≥64 GB tier (=4) lives on the `64` branch. See SPEC.md §7.3.
+# Concurrent LTO link cap. Default 2 on this branch (`32`) — tuned for 32-63 GB hosts.
+# `main` runs uncapped (matches production CI). Other tiers: `24` (=1, safe baseline), `64` (=4).
+# See SPEC §7.3.
 LINK_JOBS="${LINK_JOBS:-2}"
 MEMSTATS_INTERVAL="${MEMSTATS_INTERVAL:-1}"
 CLEAN=1
@@ -46,12 +47,12 @@ Usage: $(basename "$0") [--target NAME] [--projects LIST] [--jobs N] [--no-clean
                       MLIR adds the tablegen-heavy compile graph that makes the build Caligula-class.
                       For lighter: 'clang;lld'. To scale up: append 'libcxx;libcxxabi;compiler-rt'.
                       Env: LLVM_PROJECTS.
-  --jobs N            Parallelism for cmake --build. Default: nproc --ignore 2 emulation.
-                      Env: JOBS.
-  --link-jobs N       Concurrent LTO link cap (-DLLVM_PARALLEL_LINK_JOBS). Default: 1
-                      (parity baseline, safe for <32 GB hosts). Tier-tuned defaults live on
-                      the \`32\` (=2) and \`64\` (=4) git branches. See SPEC.md §7.3 for the
-                      parity vs max-capacity two-column methodology. Env: LINK_JOBS.
+  --jobs N            Parallelism for cmake --build. Default on this branch (\`32\`):
+                      nproc --ignore 2 emulation. Env: JOBS.
+  --link-jobs N       Concurrent LTO link cap (-DLLVM_PARALLEL_LINK_JOBS). Default on this
+                      branch (\`32\`): 2 — tuned for 32-63 GB hosts. \`main\` runs uncapped
+                      (matches production CI). Other tiers: \`24\` (=1, safe baseline),
+                      \`64\` (=4). See SPEC §7.3. Env: LINK_JOBS.
   --no-clean          Skip wipe of \$LLVM_DIR/build. Default cold-build wipes for comparability.
   --check             Run prerequisite checks only; skip fetch/configure/build.
   --no-rescue         Do not attempt to brew install missing prerequisites.
