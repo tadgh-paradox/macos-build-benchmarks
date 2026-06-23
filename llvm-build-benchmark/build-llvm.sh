@@ -16,9 +16,9 @@ LLVM_TAG="llvmorg-22.1.7"
 LLVM_PROJECTS="${LLVM_PROJECTS:-clang;lld;mlir}"
 BUILD_TARGET="${BUILD_TARGET:-all}"
 JOBS="${JOBS:-}"
-# Concurrent LTO link cap. Default 1 is the parity baseline (safe for <32 GB hosts).
-# Tier-tuned defaults live on the `32` and `64` branches. See SPEC.md §7.3.
-LINK_JOBS="${LINK_JOBS:-1}"
+# Concurrent LTO link cap. Default 2 on this branch (`32`) — max-capacity tier for 32-63 GB hosts.
+# Parity baseline (=1) lives on `main`; ≥64 GB tier (=4) lives on the `64` branch. See SPEC.md §7.3.
+LINK_JOBS="${LINK_JOBS:-2}"
 MEMSTATS_INTERVAL="${MEMSTATS_INTERVAL:-1}"
 CLEAN=1
 CHECK_ONLY=0
