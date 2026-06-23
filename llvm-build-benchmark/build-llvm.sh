@@ -16,6 +16,9 @@ LLVM_TAG="llvmorg-22.1.7"
 LLVM_PROJECTS="${LLVM_PROJECTS:-clang;lld;mlir}"
 BUILD_TARGET="${BUILD_TARGET:-all}"
 JOBS="${JOBS:-}"
+# Concurrent LTO link cap. Default 1 is the parity baseline (safe for <32 GB hosts).
+# Tier-tuned defaults live on the `32` and `64` branches. See SPEC.md §7.3.
+LINK_JOBS="${LINK_JOBS:-1}"
 MEMSTATS_INTERVAL="${MEMSTATS_INTERVAL:-1}"
 CLEAN=1
 CHECK_ONLY=0
@@ -45,6 +48,10 @@ Usage: $(basename "$0") [--target NAME] [--projects LIST] [--jobs N] [--no-clean
                       Env: LLVM_PROJECTS.
   --jobs N            Parallelism for cmake --build. Default: nproc --ignore 2 emulation.
                       Env: JOBS.
+  --link-jobs N       Concurrent LTO link cap (-DLLVM_PARALLEL_LINK_JOBS). Default: 1
+                      (parity baseline, safe for <32 GB hosts). Tier-tuned defaults live on
+                      the \`32\` (=2) and \`64\` (=4) git branches. See SPEC.md §7.3 for the
+                      parity vs max-capacity two-column methodology. Env: LINK_JOBS.
   --no-clean          Skip wipe of \$LLVM_DIR/build. Default cold-build wipes for comparability.
   --check             Run prerequisite checks only; skip fetch/configure/build.
   --no-rescue         Do not attempt to brew install missing prerequisites.
@@ -65,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     --target)    BUILD_TARGET="$2"; shift 2 ;;
     --projects)  LLVM_PROJECTS="$2"; shift 2 ;;
     --jobs)      JOBS="$2"; shift 2 ;;
+    --link-jobs) LINK_JOBS="$2"; shift 2 ;;
     --no-clean)  CLEAN=0; shift ;;
     --check)     CHECK_ONLY=1; shift ;;
     --no-rescue) RESCUE=0; shift ;;
@@ -84,6 +92,7 @@ log "LLVM dir: $LLVM_DIR"
 log "Pinned to $LLVM_TAG ($LLVM_REV)"
 log "Projects: $LLVM_PROJECTS"
 log "Target: $BUILD_TARGET"
+log "Link jobs: $LINK_JOBS"
 
 # --- Verification helpers ---
 need() { MISSING+=("$1"); warn "missing: $1"; }
@@ -218,8 +227,9 @@ start_memstats_sampler() {
 # LLVM_INCLUDE_{TESTS,BENCHMARKS,EXAMPLES}=OFF skips ancillary code we don't need to benchmark.
 # LLVM_TARGETS_TO_BUILD=AArch64 restricts codegen targets to Apple Silicon's arch; building
 # all 25+ LLVM backends adds compile time but isn't a fair test (we don't ship x86 codegen).
-# LLVM_PARALLEL_LINK_JOBS=1 prevents LLVM from running multiple LTO links concurrently — each
-# eats several GB of RAM, and concurrent LTO links are how LLVM-class builds OOM.
+# LLVM_PARALLEL_LINK_JOBS caps concurrent LTO links (each eats 3-5 GB). Default 1 is the parity
+# baseline (safe for <32 GB). Bump via --link-jobs N for max-capacity runs on bigger hosts;
+# the `32` and `64` git branches set tier-appropriate defaults. See SPEC.md §7.3.
 configure_phase() {
   log "=== Phase 5: cmake configure ==="
   local build_dir="$LLVM_DIR/build"
@@ -242,7 +252,7 @@ configure_phase() {
     -DLLVM_INCLUDE_EXAMPLES=OFF \
     -DLLVM_TARGETS_TO_BUILD=AArch64 \
     -DLLVM_PARALLEL_COMPILE_JOBS="$JOBS" \
-    -DLLVM_PARALLEL_LINK_JOBS=1
+    -DLLVM_PARALLEL_LINK_JOBS="$LINK_JOBS"
 }
 
 # --- Phase 6: timed compile. Sampler + per-line [HH:MM:SS] prefix loop. ---

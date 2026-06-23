@@ -57,7 +57,7 @@ A wrapper script that runs the real build and records measurements alongside. Si
 | `-DLLVM_INCLUDE_EXAMPLES=OFF` | Same reason. |
 | `-DLLVM_TARGETS_TO_BUILD=AArch64` | Build only Apple Silicon codegen. The default `all` adds 25+ backends (x86, ARM, PowerPC, MIPS, RISC-V, …) — substantial extra compile work that's not "fair" cross-arch. |
 | `-DLLVM_PARALLEL_COMPILE_JOBS=$JOBS` | LLVM-internal parallelism cap (extra layer on top of ninja's `--parallel`). |
-| `-DLLVM_PARALLEL_LINK_JOBS=1` | **Critical**. LLVM LTO links eat several GB of RAM each. Concurrent LTO links are the standard way to OOM an LLVM build. We serialise them. |
+| `-DLLVM_PARALLEL_LINK_JOBS=$LINK_JOBS` | Concurrent LTO link cap. Each LTO link eats 3-5 GB; concurrent links are the standard way to OOM an LLVM build. Default `1` (parity baseline, safe for <32 GB). Tunable via `--link-jobs N` for max-capacity runs on bigger hosts. See §7.3. |
 
 ### 3.5 What the memstats sidecar measures
 
@@ -118,10 +118,50 @@ Same as the other harnesses:
 2. Same arch (Apple Silicon both, or x86_64 both — not mixed).
 3. Both `memstats` sidecars show neither run was paging catastrophically.
 4. Both runs used the same LLVM pin and the same `build-llvm.sh` revision.
+5. Same `LINK_JOBS` *column* — compare parity-to-parity or max-capacity-to-max-capacity, never mixed. See §7.3.
 
-### 7.3 The `LLVM_PARALLEL_LINK_JOBS=1` choice may not match what a CI builder does
+### 7.3 `LLVM_PARALLEL_LINK_JOBS` is tunable per host RAM (parity vs max-capacity columns)
 
-A CI builder building LLVM in production would typically allow concurrent LTO links on a machine with enough RAM (32+ GB). Our `=1` setting reflects the 24 GB laptop's constraint; on a 64 GB rented Mac it'd be artificial. **For ranking purposes** this matters less than it might seem — the link-share is small at thin-LTO (see chromium SPEC §6 / caligula §3.6), so even a serialised links pipeline doesn't dominate wall-time. **For absolute-time prediction** this would matter, but per §7.1 we're not using LLVM for that.
+LLVM's LTO link of `clang` itself eats 3-5 GB of RAM. On the 24 GB reference rig at `JOBS=12`, concurrent LTO links would OOM — `LLVM_PARALLEL_LINK_JOBS=1` is load-bearing. On a 64 GB rented Mac that same `=1` is artificial: the host could absorb 2-4 concurrent links and finish faster.
+
+This creates a methodology tension for cross-machine comparison:
+
+- **Hold link-jobs at 1 everywhere** → apples-to-apples comparison, but high-RAM machines look less capable than they actually are.
+- **Tune link-jobs per host** → each machine runs at its true capacity, but you're now comparing two different workloads.
+
+We resolve this by reporting **two columns per machine**.
+
+#### The two columns
+
+| Column | Configuration | Purpose |
+|---|---|---|
+| **Parity** | `LINK_JOBS=1` (script default on `main`) | Apples-to-apples cross-machine ranking. Every machine runs identically. Headline number for "which silicon is faster on this fixed workload?" |
+| **Max-capacity** | `LINK_JOBS` tuned to host RAM (see table below) | What the machine can do when not artificially constrained by the 24 GB baseline. Answers "what would this hardware do in a real CI pipeline that tunes per host?" |
+
+When publishing a comparison, **label which column each number comes from**. Never mix parity and max-capacity numbers in the same column — that's the failure mode this methodology exists to prevent.
+
+#### Per-host tuning table
+
+LTO links eat ~3-5 GB each. Sized to leave headroom above the reference rig's 19.5 GB peak:
+
+| Host RAM | `LINK_JOBS` | Expected peak above parity baseline | Git branch |
+|---|---|---|---|
+| <32 GB | 1 | n/a (this is the baseline) | `main` |
+| 32-63 GB | 2 | +3-5 GB | `32` |
+| ≥64 GB | 4 | +9-15 GB | `64` |
+
+#### How to invoke
+
+Two equivalent paths:
+
+1. **`--link-jobs N` flag or `LINK_JOBS=N` env var** on any branch — explicit override for one run.
+2. **Check out the matching tier branch** — the `32` and `64` branches change only the script's default `LINK_JOBS` value, so `./build-llvm.sh` with no args produces the tuned config. This is the recommended path for the benchmark operator: no flag to forget, and the branch name documents which tier the log files belong to.
+
+#### Caveats
+
+- **`JOBS` (compile parallelism) is still resolved from CPU count**, not RAM. Same on all branches. Only the link-jobs default changes per branch.
+- **The parity column is the canonical cross-machine ranking number.** Max-capacity is a secondary column for context, not a replacement.
+- Per §7.1, neither column predicts absolute Caligula build time — both are ranking proxies.
 
 ### 7.4 `LLVM_ENABLE_PROJECTS` is a knob — and you also need `--target all` to actually build the subprojects
 
@@ -236,13 +276,9 @@ The canonical config slightly overshoots — 2049s vs Caligula's 1593s. We didn'
 
 If you want a closer match, untested options: `clang;lld + target=all` (no MLIR but build all of clang;lld's tools) likely lands somewhere in 600-1500s. Worth measuring as future work if exact-time-match matters.
 
-### 11.3 `LLVM_PARALLEL_LINK_JOBS=1` is conservative for 24 GB; artificial on larger hosts
+### 11.3 `LLVM_PARALLEL_LINK_JOBS` tuning across RAM tiers — implemented
 
-This setting serialises LTO links. On a 24 GB host it's load-bearing — concurrent LTO links would OOM. On a 64 GB rented Mac it's artificial: the host could absorb 2-4 concurrent links and finish faster.
-
-For *ranking* purposes this shouldn't matter much (thin-LTO link work is small; serialised links don't dominate wall-time). For absolute-time prediction across hosts with very different RAM, it would matter. We don't promise absolute-time prediction (see §7.1) so this stays as-is.
-
-A future revision could conditionalise: `LLVM_PARALLEL_LINK_JOBS=$(case host_ram in <32GB) 1;; <64GB) 2;; *) 4;; esac)` or similar. Not implemented yet.
+Previously a known limitation: `=1` is load-bearing at 24 GB but artificial on 32+ GB hosts. Now implemented via the `LINK_JOBS` env var / `--link-jobs N` flag, with tier-tuned defaults on the `32` and `64` git branches. See §7.3 for the parity vs max-capacity column methodology and the per-host table.
 
 ### 11.4 LLVM is not game-engine-shaped
 
