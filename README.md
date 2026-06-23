@@ -50,4 +50,19 @@ Config: `-G Xcode` (the Ninja generator hits OGRE 1.x's unconditional `$(CONFIGU
 
 ## Headline finding
 
-M-class Apple Silicon eats C++ compilation fast enough that the popular open-source game engines (OGRE3D, Godot) can't fill the time-axis required to match a real game engine like Caligula. LLVM at `clang;lld;mlir` with `--target all` is the only publishable workload we found that lands Caligula-class on wall-time and peak RAM. **Run `./llvm-build-benchmark/build-llvm.sh` on a candidate Mac, compare the `Compile time:` line and `analyse.sh` output against another Mac, that's the cross-machine benchmark.**
+M-class Apple Silicon eats C++ compilation fast enough that the popular open-source game engines (OGRE3D, Godot) can't fill the time-axis required to match a real game engine like Caligula. LLVM at `clang;lld;mlir` with `--target all` is the only publishable workload we found that lands Caligula-class on wall-time and peak RAM. **Run `./llvm-build-benchmark/build-llvm.sh` on the matching tier branch (see below), compare the `Compile time:` line and `analyse.sh` output against another Mac, that's the cross-machine benchmark.**
+
+## LLVM benchmark branches
+
+The LLVM harness ships its build configuration via git branches — pick the one that matches the host RAM. The branch is the contract: check it out, run `./llvm-build-benchmark/build-llvm.sh` with no args, the resulting log pairs cleanly with the branch name.
+
+| Branch | Compile jobs (`-j`) | Concurrent LTO links | Use on | What it represents |
+|---|---|---|---|---|
+| `main` | ninja default (`nproc+2`) | unbounded | hosts with ≥32 GB RAM | **Production-equivalent.** Mirrors what Paradox CI's `batmake` does (no caps anywhere). Will OOM on 24 GB hosts — don't run there. |
+| `24` | `nproc --ignore 2` | 1 | 24 GB host (the reference rig) | Safe baseline. All canonical numbers in this README and `llvm-build-benchmark/SPEC.md` were measured on this branch. |
+| `32` | `nproc --ignore 2` | 2 | 32-63 GB host | Tier-tuned for moderate RAM. |
+| `64` | `nproc --ignore 2` | 4 | ≥64 GB host | Tier-tuned for the CI-pod-sized class. |
+
+**Cross-machine comparison rule**: both runs must be on the same branch. Mixing branches mixes two different workloads. See `llvm-build-benchmark/SPEC.md` §7.3 for the full methodology, including which branch answers which question.
+
+The other three harnesses (caligula, godot, ogre3d) do not have tier branches — their parallelism settings are not RAM-bound at this scale.

@@ -15,10 +15,11 @@ LLVM_TAG="llvmorg-22.1.7"
 # Override for quick smoke tests: --projects 'clang;lld' --target clang lands in ~6 min.
 LLVM_PROJECTS="${LLVM_PROJECTS:-clang;lld;mlir}"
 BUILD_TARGET="${BUILD_TARGET:-all}"
+# JOBS and LINK_JOBS are intentionally unset on `main` — matches production CI (batmake sets neither,
+# accepting ninja's defaults: compile=nproc+2, link=unbounded). Tier branches `24`/`32`/`64` set
+# safe caps for hosts that can't run the production config. See SPEC.md §7.3.
 JOBS="${JOBS:-}"
-# Concurrent LTO link cap. Default 1 is the parity baseline (safe for <32 GB hosts).
-# Tier-tuned defaults live on the `32` and `64` branches. See SPEC.md §7.3.
-LINK_JOBS="${LINK_JOBS:-1}"
+LINK_JOBS="${LINK_JOBS:-}"
 MEMSTATS_INTERVAL="${MEMSTATS_INTERVAL:-1}"
 CLEAN=1
 CHECK_ONLY=0
@@ -46,12 +47,13 @@ Usage: $(basename "$0") [--target NAME] [--projects LIST] [--jobs N] [--no-clean
                       MLIR adds the tablegen-heavy compile graph that makes the build Caligula-class.
                       For lighter: 'clang;lld'. To scale up: append 'libcxx;libcxxabi;compiler-rt'.
                       Env: LLVM_PROJECTS.
-  --jobs N            Parallelism for cmake --build. Default: nproc --ignore 2 emulation.
-                      Env: JOBS.
-  --link-jobs N       Concurrent LTO link cap (-DLLVM_PARALLEL_LINK_JOBS). Default: 1
-                      (parity baseline, safe for <32 GB hosts). Tier-tuned defaults live on
-                      the \`32\` (=2) and \`64\` (=4) git branches. See SPEC.md §7.3 for the
-                      parity vs max-capacity two-column methodology. Env: LINK_JOBS.
+  --jobs N            Parallelism for cmake --build (compile + LLVM_PARALLEL_COMPILE_JOBS).
+                      Default on \`main\`: unset (ninja picks nproc+2, matching production CI).
+                      Tier branches \`24\`/\`32\`/\`64\` set nproc --ignore 2. Env: JOBS.
+  --link-jobs N       Concurrent LTO link cap (-DLLVM_PARALLEL_LINK_JOBS).
+                      Default on \`main\`: unset (unbounded, matching production CI).
+                      Tier branches \`24\`/\`32\`/\`64\` set 1/2/4. See SPEC.md §7.3 for the
+                      branch methodology and per-host table. Env: LINK_JOBS.
   --no-clean          Skip wipe of \$LLVM_DIR/build. Default cold-build wipes for comparability.
   --check             Run prerequisite checks only; skip fetch/configure/build.
   --no-rescue         Do not attempt to brew install missing prerequisites.
@@ -146,20 +148,15 @@ rescue() {
   (( ${#MISSING[@]} == 0 )) || die "still missing after rescue: ${MISSING[*]}"
 }
 
-# --- Resolve JOBS: explicit > emulated nproc --ignore 2 > sysctl ncpu - 2 ---
+# --- Resolve JOBS: explicit only; unset = leave it to ninja (matches production CI) ---
+# Tier branches (`24`/`32`/`64`) set JOBS to `nproc --ignore 2` themselves; on `main` we
+# leave it unset so ninja defaults apply.
 resolve_jobs() {
-  if [[ -n "$JOBS" ]]; then log "JOBS explicit: $JOBS"; return; fi
-  local n
-  if command -v nproc >/dev/null 2>&1; then
-    n=$(nproc --ignore 2 2>/dev/null) || n=$(nproc)
-  elif command -v gnproc >/dev/null 2>&1; then
-    n=$(gnproc --ignore 2)
+  if [[ -n "$JOBS" ]]; then
+    log "JOBS explicit: $JOBS"
   else
-    n=$(sysctl -n hw.ncpu)
-    n=$(( n > 2 ? n - 2 : 1 ))
+    log "JOBS unset: ninja will use its default (nproc+2). Matches production CI."
   fi
-  JOBS="$n"
-  log "JOBS auto: $JOBS (matches caligula default: nproc --ignore 2)"
 }
 
 # --- Phase 3: shallow init+fetch. ---
@@ -227,9 +224,8 @@ start_memstats_sampler() {
 # LLVM_INCLUDE_{TESTS,BENCHMARKS,EXAMPLES}=OFF skips ancillary code we don't need to benchmark.
 # LLVM_TARGETS_TO_BUILD=AArch64 restricts codegen targets to Apple Silicon's arch; building
 # all 25+ LLVM backends adds compile time but isn't a fair test (we don't ship x86 codegen).
-# LLVM_PARALLEL_LINK_JOBS caps concurrent LTO links (each eats 3-5 GB). Default 1 is the parity
-# baseline (safe for <32 GB). Bump via --link-jobs N for max-capacity runs on bigger hosts;
-# the `32` and `64` git branches set tier-appropriate defaults. See SPEC.md §7.3.
+# LLVM_PARALLEL_{COMPILE,LINK}_JOBS only get passed if JOBS/LINK_JOBS are set. On `main` they are
+# not set — matches production CI (batmake sets neither). Tier branches `24`/`32`/`64` set both.
 configure_phase() {
   log "=== Phase 5: cmake configure ==="
   local build_dir="$LLVM_DIR/build"
@@ -241,6 +237,9 @@ configure_phase() {
     log "build.ninja already present, skipping configure"
     return
   fi
+  local -a parallel_args=()
+  if [[ -n "$JOBS" ]];      then parallel_args+=("-DLLVM_PARALLEL_COMPILE_JOBS=$JOBS"); fi
+  if [[ -n "$LINK_JOBS" ]]; then parallel_args+=("-DLLVM_PARALLEL_LINK_JOBS=$LINK_JOBS"); fi
   log "Running cmake configure (projects=$LLVM_PROJECTS, LTO=Thin, ninja)"
   cmake -S "$LLVM_DIR/llvm" -B "$build_dir" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
@@ -251,13 +250,13 @@ configure_phase() {
     -DLLVM_INCLUDE_BENCHMARKS=OFF \
     -DLLVM_INCLUDE_EXAMPLES=OFF \
     -DLLVM_TARGETS_TO_BUILD=AArch64 \
-    -DLLVM_PARALLEL_COMPILE_JOBS="$JOBS" \
-    -DLLVM_PARALLEL_LINK_JOBS="$LINK_JOBS"
+    "${parallel_args[@]}"
 }
 
 # --- Phase 6: timed compile. Sampler + per-line [HH:MM:SS] prefix loop. ---
 build_phase() {
-  log "=== Phase 6: compile (target=$BUILD_TARGET, jobs=$JOBS) ==="
+  local jobs_label="${JOBS:-ninja default}"
+  log "=== Phase 6: compile (target=$BUILD_TARGET, jobs=$jobs_label) ==="
   local build_dir="$LLVM_DIR/build"
   [[ -f "$build_dir/build.ninja" ]] || die "no build.ninja at $build_dir; configure failed?"
 
@@ -269,8 +268,10 @@ build_phase() {
   trap "kill $sampler_pid 2>/dev/null || true; wait $sampler_pid 2>/dev/null || true" EXIT INT TERM
   log "Memstats sampler PID $sampler_pid → $memstats_log (interval=${MEMSTATS_INTERVAL}s)"
 
+  local -a build_args=()
+  if [[ -n "$JOBS" ]]; then build_args+=(--parallel "$JOBS"); fi
   local compile_start=$SECONDS
-  caffeinate -i cmake --build "$build_dir" --parallel "$JOBS" --target "$BUILD_TARGET" 2>&1 \
+  caffeinate -i cmake --build "$build_dir" "${build_args[@]}" --target "$BUILD_TARGET" 2>&1 \
     | while IFS= read -r line; do
         printf '[%s] %s\n' "$(date +%H:%M:%S)" "$line"
       done
